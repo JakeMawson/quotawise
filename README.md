@@ -2,6 +2,21 @@
 
 **Local AI usage intelligence for macOS.**
 
+## Install QuotaWise
+
+**Official website:** [quotawise.app](https://quotawise.app)
+
+Install QuotaWise with Homebrew:
+
+```sh
+brew tap JakeMawson/tap
+brew install quotawise
+```
+
+The tap command is needed only once. QuotaWise requires macOS 15 or later.
+
+Reviews and feedback can be submitted at [quotawise.app](https://quotawise.app).
+
 QuotaWise is a native macOS menu-bar app for people who use Codex and Claude
 Code throughout the day. It makes the practical questions easy to answer:
 what is left, when does it reset, and where did the work go?
@@ -47,6 +62,9 @@ misleadingly precise answer.
 - macOS 15 or later
 - Xcode 16 / Swift 6 or later
 
+For the normal supported install, use the Homebrew command above. The source
+instructions below are for contributors and local development.
+
 ### Run from source
 
 ```sh
@@ -75,8 +93,8 @@ QUOTAWISE_CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
 ## Project status
 
 QuotaWise is actively evolving. Provider integrations and the information
-available from them can change, so feedback, bug reports, and contributions
-are welcome.
+available from them can change. Share reviews and feedback through
+[quotawise.app](https://quotawise.app); contributions are also welcome.
 
 ## Licence
 
