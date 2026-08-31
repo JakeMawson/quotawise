@@ -46,12 +46,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let pulseSweepDuration: TimeInterval = 1.0
     private static let pulseFrameInterval: TimeInterval = 1.0 / 30.0
     private static let reopenRequestNotification = Notification.Name(
-        "com.jakemawson.quotawise.menuagent3.request-studio-reopen"
+        "com.jakemawson.quotawise.menuagent4.request-studio-reopen"
     )
     private static let launchAtLoginService = SMAppService.loginItem(
-        identifier: "com.jakemawson.quotawise.menuagent3"
+        identifier: "com.jakemawson.quotawise.menuagent4"
     )
     private static let legacyLaunchAtLoginServices = [
+        SMAppService.loginItem(identifier: "com.jakemawson.quotawise.menuagent3"),
         SMAppService.loginItem(identifier: "com.jakemawson.quotawise.menuagent2"),
         SMAppService.loginItem(identifier: "com.jakemawson.quotawise.menuagent"),
     ]

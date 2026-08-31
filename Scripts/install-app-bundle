@@ -19,13 +19,17 @@ launch_services="/System/Library/Frameworks/CoreServices.framework/Frameworks/La
 # old invisible instance can survive while the new bundle sits on disk.
 /usr/bin/pkill -TERM -f '^/Applications/QuotaWise[.]app/Contents/MacOS/QuotaWise( |$)' 2>/dev/null || true
 menu_agent_is_running() {
-  /usr/bin/pgrep -f '^com[.]jakemawson[.]quotawise[.]menuagent3$' >/dev/null 2>&1 ||
+  /usr/bin/pgrep -f '^com[.]jakemawson[.]quotawise[.]menuagent4$' >/dev/null 2>&1 ||
+    /usr/bin/pgrep -f '^com[.]jakemawson[.]quotawise[.]menuagent3$' >/dev/null 2>&1 ||
     /usr/bin/pgrep -f '^/Applications/QuotaWise[.]app/Contents/Library/LoginItems/QuotaWiseMenuAgent[.]app/Contents/MacOS/QuotaWise( |$)' >/dev/null 2>&1
 }
 if menu_agent_is_running; then
   # A ServiceManagement login item is relaunched after a signal termination.
   # Ask AppKit to quit normally so launchd records a successful intentional
   # exit and leaves it stopped until the next user launch.
+  /usr/bin/osascript \
+    -e 'tell application id "com.jakemawson.quotawise.menuagent4" to quit' \
+    >/dev/null 2>&1 || true
   /usr/bin/osascript \
     -e 'tell application id "com.jakemawson.quotawise.menuagent3" to quit' \
     >/dev/null 2>&1 || true

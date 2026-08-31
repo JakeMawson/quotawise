@@ -17,7 +17,7 @@ Set the identity for the release command. The version must equal the
 `CFBundleShortVersionString` in `Support/AppBundle/Info.plist`.
 
 ```sh
-export QUOTAWISE_VERSION="1.1.0"
+export QUOTAWISE_VERSION="1.1.1"
 export QUOTAWISE_CODE_SIGN_IDENTITY="Developer ID Application: Jake Mawson (6RWK4446NQ)"
 ```
 
@@ -62,7 +62,7 @@ With the profile already stored, submit the already-created and verified
 versioned artifact without rebuilding or replacing it:
 
 ```sh
-QUOTAWISE_VERSION="1.1.0" \
+QUOTAWISE_VERSION="1.1.1" \
 QUOTAWISE_CODE_SIGN_IDENTITY="Developer ID Application: Jake Mawson (6RWK4446NQ)" \
 Scripts/release-macos --notarize-existing
 ```
@@ -82,15 +82,15 @@ it is the value required by Homebrew.
 ## Publish and distribute
 
 Upload only the final ZIP to the matching GitHub Release tag, for example
-`v1.1.0` on `JakeMawson/quotawise`. Do not commit `QuotaWise.app` to `main`.
+`v1.1.1` on `JakeMawson/quotawise`. Do not commit `QuotaWise.app` to `main`.
 
 For the immediate install route, put the following completed cask into the
 separate `JakeMawson/homebrew-tap` repository at `Casks/quotawise.rb`:
 
 ```ruby
 cask "quotawise" do
-  version "1.1.0"
-  sha256 "<SHA-256 OF QuotaWise-1.1.0.zip>"
+  version "1.1.1"
+  sha256 "<SHA-256 OF QuotaWise-1.1.1.zip>"
 
   url "https://github.com/JakeMawson/quotawise/releases/download/v#{version}/QuotaWise-#{version}.zip"
   name "QuotaWise"

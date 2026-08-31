@@ -61,9 +61,10 @@ public final class UsageApplicationModel: ObservableObject {
     private var hasClaudeHistory = false
 
     static let indexingFileThreshold = 100
-    private static let bundleIdentityMigrationMarker = "bundle-identity-migration-v6"
-    private static let currentBundleIdentifier = "com.jakemawson.quotawise.menuagent3"
+    private static let bundleIdentityMigrationMarker = "bundle-identity-migration-v7"
+    private static let currentBundleIdentifier = "com.jakemawson.quotawise.menuagent4"
     private static let legacyBundleIdentifiers = [
+        "com.jakemawson.quotawise.menuagent3",
         "com.jakemawson.quotawise.menuagent2",
         "com.jakemawson.quotawise.menuagent",
         "com.jakemawson.quotawise.statusitem",

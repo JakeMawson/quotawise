@@ -4,12 +4,17 @@ import ServiceManagement
 
 @main
 enum QuotaWiseLauncher {
-    private static let menuAgentBundleIdentifier = "com.jakemawson.quotawise.menuagent3"
+    private static let menuAgentBundleIdentifier = "com.jakemawson.quotawise.menuagent4"
+    private static let legacyMenuAgentBundleIdentifiers = [
+        "com.jakemawson.quotawise.menuagent3",
+        "com.jakemawson.quotawise.menuagent2",
+        "com.jakemawson.quotawise.menuagent",
+    ]
     private static let launchAtLoginChoiceKey = "launch-at-login-user-enabled-v2"
-    private static let launchAtLoginMigrationKey = "launch-at-login-main-app-migrated-v1"
+    private static let launchAtLoginMigrationKey = "launch-at-login-main-app-migrated-v2"
     private static let legacyLaunchAtLoginRequestedKey = "launch-at-login-requested-v1"
     private static let reopenRequestNotification = Notification.Name(
-        "com.jakemawson.quotawise.menuagent3.request-studio-reopen"
+        "com.jakemawson.quotawise.menuagent4.request-studio-reopen"
     )
 
     @MainActor
@@ -86,6 +91,8 @@ enum QuotaWiseLauncher {
         let desiredState: Bool
         if let savedChoice = defaults?.object(forKey: launchAtLoginChoiceKey) as? Bool {
             desiredState = savedChoice
+        } else if let legacyChoice = legacyLaunchAtLoginChoice() {
+            desiredState = legacyChoice
         } else if defaults?.bool(forKey: legacyLaunchAtLoginRequestedKey) == true {
             // An existing installation already made its choice through the old
             // helper registration. Preserve that current state during migration.
@@ -110,6 +117,18 @@ enum QuotaWiseLauncher {
 
         saveLaunchAtLoginChoice(desiredState)
         defaults?.set(true, forKey: launchAtLoginMigrationKey)
+    }
+
+    private static func legacyLaunchAtLoginChoice() -> Bool? {
+        for legacyBundleIdentifier in legacyMenuAgentBundleIdentifiers {
+            guard let legacyDefaults = UserDefaults(suiteName: legacyBundleIdentifier),
+                  legacyDefaults.object(forKey: launchAtLoginChoiceKey) != nil
+            else {
+                continue
+            }
+            return legacyDefaults.bool(forKey: launchAtLoginChoiceKey)
+        }
+        return nil
     }
 
     @MainActor
