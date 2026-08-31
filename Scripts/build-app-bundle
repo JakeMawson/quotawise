@@ -1,0 +1,55 @@
+#!/bin/zsh -f
+set -eu
+
+project_root="${0:A:h:h}"
+configuration="${1:-release}"
+code_sign_identity="${QUOTAWISE_CODE_SIGN_IDENTITY:-}"
+
+if [[ -z "$code_sign_identity" ]]; then
+  print -u2 -- "Set QUOTAWISE_CODE_SIGN_IDENTITY to your Apple signing identity before bundling."
+  exit 2
+fi
+
+case "$configuration" in
+  debug|release) ;;
+  *)
+    print -u2 -- "Usage: Scripts/build-app-bundle [debug|release]"
+    exit 2
+    ;;
+esac
+
+cd "$project_root"
+/usr/bin/swift build -c "$configuration" --product QuotaWise
+/usr/bin/swift build -c "$configuration" --product QuotaWiseLauncher
+/usr/bin/swift build -c "$configuration" --product codexusage-native
+bin_path="$(/usr/bin/swift build -c "$configuration" --show-bin-path)"
+bundle_path="$project_root/build/macos/QuotaWise.bundle-staging"
+agent_path="$bundle_path/Contents/Library/LoginItems/QuotaWiseMenuAgent.app"
+icon_path="$project_root/build/macos/AppIcon.icns"
+icon_source="$project_root/Support/AppBundle/QuotaWiseAppIcon.png"
+
+# Generate the macOS bundle icon from its full-tile native artwork. The
+# transparent website mark remains a separate, shared browser-facing asset.
+"$project_root/Scripts/generate-app-icon" \
+  "$icon_source" \
+  "$icon_path"
+
+# This is an exact generated bundle. Recreate it so removed package members
+# cannot survive a build and contaminate the installed application.
+/bin/rm -rf "$bundle_path"
+/bin/mkdir -p \
+  "$bundle_path/Contents/MacOS" \
+  "$bundle_path/Contents/Resources" \
+  "$agent_path/Contents/MacOS" \
+  "$agent_path/Contents/Resources"
+/usr/bin/install -m 0644 "$project_root/Support/AppBundle/Info.plist" "$bundle_path/Contents/Info.plist"
+/usr/bin/install -m 0644 "$icon_path" "$bundle_path/Contents/Resources/AppIcon.icns"
+/usr/bin/install -m 0755 "$bin_path/QuotaWiseLauncher" "$bundle_path/Contents/MacOS/QuotaWiseLauncher"
+/usr/bin/install -m 0755 "$bin_path/codexusage-native" "$bundle_path/Contents/MacOS/codexusage-native"
+/usr/bin/install -m 0644 "$project_root/Support/AppBundle/MenuAgentInfo.plist" "$agent_path/Contents/Info.plist"
+/usr/bin/install -m 0644 "$icon_path" "$agent_path/Contents/Resources/AppIcon.icns"
+/usr/bin/install -m 0755 "$bin_path/QuotaWise" "$agent_path/Contents/MacOS/QuotaWise"
+/usr/bin/codesign --force --deep --sign "$code_sign_identity" "$agent_path"
+/usr/bin/codesign --force --deep --sign "$code_sign_identity" "$bundle_path"
+
+print -r -- "$bundle_path"

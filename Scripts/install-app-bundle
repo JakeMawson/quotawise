@@ -1,0 +1,60 @@
+#!/bin/zsh -f
+set -eu
+
+project_root="${0:A:h:h}"
+code_sign_identity="${QUOTAWISE_CODE_SIGN_IDENTITY:-}"
+
+if [[ -z "$code_sign_identity" ]]; then
+  print -u2 -- "Set QUOTAWISE_CODE_SIGN_IDENTITY to your Apple signing identity before installing."
+  exit 2
+fi
+"$project_root/Scripts/build-app-bundle" release >&2
+source_bundle="$project_root/build/macos/QuotaWise.bundle-staging"
+installed_bundle="/Applications/QuotaWise.app"
+launch_services="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+# Replacing the bundle does not replace a process that macOS has already
+# mapped into memory (notably the launch-at-login menu-bar instance). Retire
+# only this exact local-development executable before installing, otherwise an
+# old invisible instance can survive while the new bundle sits on disk.
+/usr/bin/pkill -TERM -f '^/Applications/QuotaWise[.]app/Contents/MacOS/QuotaWise( |$)' 2>/dev/null || true
+menu_agent_is_running() {
+  /usr/bin/pgrep -f '^com[.]jakemawson[.]quotawise[.]menuagent3$' >/dev/null 2>&1 ||
+    /usr/bin/pgrep -f '^/Applications/QuotaWise[.]app/Contents/Library/LoginItems/QuotaWiseMenuAgent[.]app/Contents/MacOS/QuotaWise( |$)' >/dev/null 2>&1
+}
+if menu_agent_is_running; then
+  # A ServiceManagement login item is relaunched after a signal termination.
+  # Ask AppKit to quit normally so launchd records a successful intentional
+  # exit and leaves it stopped until the next user launch.
+  /usr/bin/osascript \
+    -e 'tell application id "com.jakemawson.quotawise.menuagent3" to quit' \
+    >/dev/null 2>&1 || true
+fi
+/usr/bin/pkill -TERM -f '^/Applications/QuotaWise[.]app/Contents/MacOS/QuotaWiseLauncher( |$)' 2>/dev/null || true
+
+waiter_attempt=1
+while menu_agent_is_running; do
+  if (( waiter_attempt >= 50 )); then
+    print -u2 -- "QuotaWise menu agent did not terminate before bundle replacement"
+    exit 1
+  fi
+  /bin/sleep 0.1
+  (( waiter_attempt += 1 ))
+done
+
+# This exact installed bundle is generated from the authorized local source.
+# Replacing it avoids retaining files from the pre-launcher bundle layout.
+/bin/rm -rf "$installed_bundle"
+/usr/bin/ditto "$source_bundle" "$installed_bundle"
+/usr/bin/codesign --force --deep --sign "$code_sign_identity" "$installed_bundle"
+"$launch_services" -f "$installed_bundle"
+"$launch_services" -f "$installed_bundle/Contents/Library/LoginItems/QuotaWiseMenuAgent.app"
+# The build tree contains a byte-for-byte staging copy of both bundle IDs.
+# Leave the files available for inspection, but remove their LaunchServices
+# registrations so app discovery resolves each ID to the installed bundle.
+"$launch_services" -u "$source_bundle/Contents/Library/LoginItems/QuotaWiseMenuAgent.app" \
+  >/dev/null 2>&1 || true
+"$launch_services" -u "$source_bundle" >/dev/null 2>&1 || true
+/usr/bin/touch "$installed_bundle"
+
+print -r -- "$installed_bundle"
