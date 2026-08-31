@@ -1183,69 +1183,38 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertEqual(result.map(\.id), ["exact", "later"])
     }
 
-    func testSessionChartMarkersIncludeEstimatedScheduleEvents() {
+    func testWeeklyMarkersFilterToTheVisibleShortRange() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
-        let period = UsagePeriod(start: start, end: start.addingTimeInterval(86_400))
-        let observed = Self.resetEvent(
-            id: "observed-spark-session",
+        let period = UsagePeriod(start: start, end: start.addingTimeInterval(5 * 3_600))
+        let weeklyInside = Self.resetEvent(
+            id: "weekly-inside",
             date: start.addingTimeInterval(4 * 3_600),
             confidence: .exact,
-            bucketID: "codex_bengalfox"
+            kind: .weekly
         )
-        let inferredSchedule = Self.resetEvent(
-            id: "inferred-spark-session",
-            date: start.addingTimeInterval(8 * 3_600),
+        let weeklyOutside = Self.resetEvent(
+            id: "weekly-outside",
+            date: start.addingTimeInterval(6 * 3_600),
             confidence: .estimated,
+            kind: .weekly
+        )
+        let sessionInside = Self.resetEvent(
+            id: "session-inside",
+            date: start.addingTimeInterval(2 * 3_600),
+            confidence: .exact,
+            kind: .session,
             bucketID: "codex_bengalfox"
         )
 
         let result = UsageApplicationModel.observedResetMarkers(
-            from: [observed, inferredSchedule],
+            from: [weeklyInside, weeklyOutside, sessionInside],
             provider: .codex,
-            kind: .session,
+            kind: .weekly,
             period: period,
             now: period.end
         )
 
-        XCTAssertEqual(result.map(\.id), ["observed-spark-session", "inferred-spark-session"])
-    }
-
-    func testSessionResetScheduleIncludesEveryBoundaryInOneDay() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let period = UsagePeriod(start: now.addingTimeInterval(-86_400), end: now)
-        let bucket = LimitBucket(
-            id: "codex",
-            provider: .codex,
-            displayName: "Codex",
-            planType: nil,
-            windows: [
-                RateLimitWindow(
-                    usedPercent: 50,
-                    durationMinutes: 300,
-                    resetsAt: now.addingTimeInterval(3 * 3_600),
-                    confidence: .exact,
-                    estimateBasis: nil
-                ),
-            ],
-            confidence: .exact,
-            sourceDescription: "test"
-        )
-
-        let markers = UsageApplicationModel.sessionResetSchedule(
-            from: [bucket],
-            provider: .codex,
-            period: period,
-            now: now
-        )
-
-        XCTAssertEqual(markers.map(\.date), [
-            now.addingTimeInterval(-2 * 3_600),
-            now.addingTimeInterval(-7 * 3_600),
-            now.addingTimeInterval(-12 * 3_600),
-            now.addingTimeInterval(-17 * 3_600),
-            now.addingTimeInterval(-22 * 3_600),
-        ])
-        XCTAssertTrue(markers.allSatisfy { $0.confidence == .estimated })
+        XCTAssertEqual(result.map(\.id), ["weekly-inside"])
     }
 
     func testWeeklyBackfillUsesOneSeamPerWeekWhenMultipleBucketsHaveDifferentResetTimes() async {

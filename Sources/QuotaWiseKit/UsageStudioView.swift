@@ -325,11 +325,7 @@ public struct UsageStudioView: View {
                         }
                         Spacer()
                         HStack(spacing: 12) {
-                            if model.selectedRange == .fiveHours || model.selectedRange == .oneDay {
-                                resetLegend(color: UsagePalette.porcelain.opacity(0.55), label: "Session reset")
-                            } else {
-                                resetLegend(color: UsagePalette.mineralTeal, label: "Weekly reset")
-                            }
+                            resetLegend(color: UsagePalette.mineralTeal, label: "Weekly reset")
                             if resets.contains(where: \.isSparkModelReset) {
                                 resetLegend(color: UsagePalette.burntAmber, label: "Spark reset")
                             }

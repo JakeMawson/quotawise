@@ -631,32 +631,21 @@ public final class UsageApplicationModel: ObservableObject {
         let provider = provider ?? selectedProvider
         let range = range ?? selectedRange
         let period = usagePeriod(range: range, now: now)
-        let relevantKind: ResetKind = switch range {
-        case .fiveHours, .oneDay: .session
-        case .sevenDays, .thirtyDays: .weekly
-        }
-        let observed = Self.observedResetMarkers(
+        // All Studio zoom levels show the same weekly-reset timeline. The
+        // shorter ranges are only a closer view of that timeline, rather than
+        // a projection of each live session window's future cadence.
+        return Self.observedResetMarkers(
             from: resetEvents,
             provider: provider,
-            kind: relevantKind,
+            kind: .weekly,
             period: period,
             now: now
         )
-        guard relevantKind == .session else { return observed }
-
-        let scheduled = Self.sessionResetSchedule(
-            from: limits(for: provider),
-            provider: provider,
-            period: period,
-            now: now
-        )
-        return Self.deduplicateVisibleResets(observed + scheduled, kind: .session)
     }
 
-    /// Chart seams include both observed resets and the app's known reset
-    /// schedule. Scheduled session seams remain visibly distinguished by their
-    /// estimated confidence, so the 1d chart can show every expected rolling
-    /// reset without presenting it as directly observed evidence.
+    /// Chart seams include persisted observed resets and the app's known weekly
+    /// schedule. Estimates remain visibly distinguished from directly observed
+    /// reset evidence.
     nonisolated static func observedResetMarkers(
         from resetEvents: [ResetEvent],
         provider: AIProvider,
@@ -671,56 +660,6 @@ public final class UsageApplicationModel: ObservableObject {
                 && $0.date <= now
         }
         return deduplicateVisibleResets(observed, kind: kind)
-    }
-
-    /// A live `resetsAt` timestamp gives us a concrete rolling-window cadence.
-    /// Reconstruct just the visible past boundaries from it; do not persist
-    /// them, because the next live limit response remains authoritative.
-    nonisolated static func sessionResetSchedule(
-        from buckets: [LimitBucket],
-        provider: AIProvider,
-        period: UsagePeriod,
-        now: Date
-    ) -> [ResetEvent] {
-        buckets.flatMap { bucket in
-            bucket.windows.compactMap { window -> [ResetEvent]? in
-                guard window.kind == .session,
-                      let resetAt = window.resetsAt,
-                      let durationMinutes = window.durationMinutes,
-                      durationMinutes > 0 else {
-                    return nil
-                }
-
-                let interval = TimeInterval(durationMinutes * 60)
-                var date = resetAt
-                while date > now {
-                    date = date.addingTimeInterval(-interval)
-                }
-                while date.addingTimeInterval(interval) <= now {
-                    date = date.addingTimeInterval(interval)
-                }
-
-                var markers: [ResetEvent] = []
-                while date >= period.start {
-                    if period.contains(date) {
-                        markers.append(
-                            ResetEvent(
-                                id: "schedule:\(provider.rawValue):\(bucket.id):\(durationMinutes):\(Int(date.timeIntervalSince1970))",
-                                provider: provider,
-                                date: date,
-                                detectedAt: now,
-                                kind: .session,
-                                bucketID: bucket.id,
-                                label: "\(bucket.displayName) session reset (estimated schedule)",
-                                confidence: .estimated
-                            )
-                        )
-                    }
-                    date = date.addingTimeInterval(-interval)
-                }
-                return markers
-            }.flatMap { $0 }
-        }
     }
 
     nonisolated static func deduplicateVisibleResets(
