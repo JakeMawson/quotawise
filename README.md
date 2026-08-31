@@ -72,6 +72,13 @@ QUOTAWISE_CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
   Scripts/install-app-bundle
 ```
 
+### Release distribution
+
+For the Developer ID signing, notarization, GitHub Release, and Homebrew Cask
+workflow, see [the macOS release guide](docs/releasing-macos.md). Release
+artifacts are generated under `build/release/` and are intentionally not
+committed to this repository.
+
 ## Project status
 
 QuotaWise is actively evolving. Provider integrations and the information

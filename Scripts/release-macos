@@ -1,0 +1,198 @@
+#!/bin/zsh -f
+set -euo pipefail
+
+project_root="${0:A:h:h}"
+code_sign_identity="${QUOTAWISE_CODE_SIGN_IDENTITY:-}"
+version="${QUOTAWISE_VERSION:-}"
+notary_profile="${QUOTAWISE_NOTARY_PROFILE:-quotawise-notary}"
+should_notarize=false
+reuse_existing_release=false
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  QUOTAWISE_VERSION=<version> \
+  QUOTAWISE_CODE_SIGN_IDENTITY='Developer ID Application: …' \
+  Scripts/release-macos [--notarize] [--notarize-existing] [--notary-profile <profile>]
+
+Builds QuotaWise, creates a clean versioned release app, signs all nested code
+inside-out with hardened runtime and a secure timestamp, and writes a ZIP for
+Apple notarization. With --notarize, it submits that ZIP using an existing
+notarytool Keychain profile, staples the accepted ticket, validates it, and
+creates the final distribution ZIP.
+
+Use --notarize-existing to submit an already-created, strictly verified
+build/release/<version>/ artifact without rebuilding, re-signing, or replacing
+it. This is useful after creating a Keychain profile in a separate step.
+
+The script refuses to overwrite build/release/<version>. Remove or archive an
+old generated release directory yourself before rerunning the same version.
+USAGE
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --notarize)
+      should_notarize=true
+      ;;
+    --notarize-existing)
+      should_notarize=true
+      reuse_existing_release=true
+      ;;
+    --notary-profile)
+      if (( $# < 2 )); then
+        print -u2 -- "--notary-profile requires a Keychain profile name"
+        exit 2
+      fi
+      shift
+      notary_profile="$1"
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      print -u2 -- "Unknown option: $1"
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$version" ]]; then
+  print -u2 -- "Set QUOTAWISE_VERSION (for example, 1.1.0)."
+  exit 2
+fi
+
+if [[ ! "$version" =~ '^[0-9]+(\.[0-9]+){1,2}([-.][0-9A-Za-z.-]+)?$' ]]; then
+  print -u2 -- "QUOTAWISE_VERSION must be a release-style version, got: $version"
+  exit 2
+fi
+
+if [[ "$reuse_existing_release" == false && -z "$code_sign_identity" ]]; then
+  print -u2 -- "Set QUOTAWISE_CODE_SIGN_IDENTITY to a Developer ID Application identity."
+  exit 2
+fi
+
+if [[ -n "$code_sign_identity" && "$code_sign_identity" != Developer\ ID\ Application:* ]]; then
+  print -u2 -- "QUOTAWISE_CODE_SIGN_IDENTITY must name a Developer ID Application certificate."
+  exit 2
+fi
+
+if [[ -n "$code_sign_identity" ]] && ! /usr/bin/security find-identity -v -p codesigning | /usr/bin/grep -F -- "$code_sign_identity" >/dev/null; then
+  print -u2 -- "The requested signing identity is not available in this login keychain: $code_sign_identity"
+  exit 2
+fi
+
+cd "$project_root"
+
+staging_app="$project_root/build/macos/QuotaWise.bundle-staging"
+release_root="$project_root/build/release/$version"
+release_app="$release_root/QuotaWise.app"
+notarization_zip="$release_root/QuotaWise-$version-notarization.zip"
+final_zip="$release_root/QuotaWise-$version.zip"
+
+sign_code() {
+  local code_path="$1"
+  /usr/bin/codesign \
+    --force \
+    --options runtime \
+    --timestamp \
+    --sign "$code_sign_identity" \
+    "$code_path"
+}
+
+if [[ "$reuse_existing_release" == false ]]; then
+  "$project_root/Scripts/build-app-bundle" release
+
+  if [[ ! -d "$staging_app" ]]; then
+    print -u2 -- "Expected generated staging app was not found: $staging_app"
+    exit 1
+  fi
+
+  bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$staging_app/Contents/Info.plist")"
+  if [[ "$bundle_version" != "$version" ]]; then
+    print -u2 -- "QUOTAWISE_VERSION ($version) must match CFBundleShortVersionString ($bundle_version)."
+    exit 2
+  fi
+
+  if [[ -e "$release_root" ]]; then
+    print -u2 -- "Refusing to overwrite existing release output: $release_root"
+    print -u2 -- "Use --notarize-existing to submit the verified artifact, or archive it before rebuilding this version."
+    exit 2
+  fi
+
+  /bin/mkdir -p "$release_root"
+  /usr/bin/ditto "$staging_app" "$release_app"
+
+  # Sign individual Mach-O files first. This explicitly includes helper tools
+  # and the nested menu-agent executable, rather than treating --deep as
+  # production signing. Each embedded code bundle is then signed innermost first.
+  while IFS= read -r -d '' code_path; do
+    if /usr/bin/file -b "$code_path" | /usr/bin/grep -q 'Mach-O'; then
+      sign_code "$code_path"
+    fi
+  done < <(/usr/bin/find "$release_app" -type f -print0)
+
+  while IFS= read -r nested_bundle; do
+    [[ "$nested_bundle" == "$release_app" ]] && continue
+    sign_code "$nested_bundle"
+  done < <(
+    /usr/bin/find "$release_app" -depth -type d \
+      \( -name '*.app' -o -name '*.appex' -o -name '*.xpc' -o -name '*.framework' \) \
+      -print | /usr/bin/awk '{ print length, $0 }' | /usr/bin/sort -rn | /usr/bin/cut -d' ' -f2-
+  )
+
+  sign_code "$release_app"
+else
+  if [[ ! -d "$release_app" || ! -f "$notarization_zip" ]]; then
+    print -u2 -- "Expected existing release app and notarization ZIP under: $release_root"
+    exit 2
+  fi
+fi
+
+bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$release_app/Contents/Info.plist")"
+if [[ "$bundle_version" != "$version" ]]; then
+  print -u2 -- "QUOTAWISE_VERSION ($version) must match the release app version ($bundle_version)."
+  exit 2
+fi
+
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$release_app"
+signature_details="$(/usr/bin/codesign -dv --verbose=4 "$release_app" 2>&1)"
+print -r -- "$signature_details"
+if [[ -n "$code_sign_identity" ]]; then
+  print -r -- "$signature_details" | /usr/bin/grep -F -- "Authority=$code_sign_identity" >/dev/null
+else
+  print -r -- "$signature_details" | /usr/bin/grep -E '^Authority=Developer ID Application:' >/dev/null
+fi
+print -r -- "$signature_details" | /usr/bin/grep -E 'flags=.*runtime' >/dev/null
+print -r -- "$signature_details" | /usr/bin/grep -E 'Timestamp=' >/dev/null
+
+if [[ "$reuse_existing_release" == false ]]; then
+  /usr/bin/ditto -c -k --keepParent "$release_app" "$notarization_zip"
+  print -r -- "Pre-notarization archive: $notarization_zip"
+fi
+
+if [[ "$should_notarize" == false ]]; then
+  print -r -- "Not submitted to Apple. Set up a notarytool Keychain profile, then rerun with --notarize."
+  exit 0
+fi
+
+notary_result="$(/usr/bin/xcrun notarytool submit "$notarization_zip" --keychain-profile "$notary_profile" --wait --output-format json)"
+print -r -- "$notary_result"
+if ! print -r -- "$notary_result" | /usr/bin/grep -E '"status"[[:space:]]*:[[:space:]]*"Accepted"' >/dev/null; then
+  print -u2 -- "Apple did not accept this submission. The generated archive remains at: $notarization_zip"
+  exit 1
+fi
+
+/usr/bin/xcrun stapler staple "$release_app"
+/usr/bin/xcrun stapler validate "$release_app"
+/usr/sbin/spctl --assess --type execute --verbose=4 "$release_app"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$release_app"
+
+# The stapled app has changed, so make a new final archive. The submitted ZIP
+# remains alongside it for troubleshooting instead of being silently removed.
+/usr/bin/ditto -c -k --keepParent "$release_app" "$final_zip"
+print -r -- "Final distribution archive: $final_zip"
+/usr/bin/shasum -a 256 "$final_zip"
