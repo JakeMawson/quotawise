@@ -9,11 +9,10 @@
 Install QuotaWise with Homebrew:
 
 ```sh
-brew tap JakeMawson/tap
 brew install quotawise
 ```
 
-The tap command is needed only once. QuotaWise requires macOS 15 or later.
+QuotaWise requires macOS 15 or later.
 
 Reviews and feedback can be submitted at [quotawise.app](https://quotawise.app).
 
