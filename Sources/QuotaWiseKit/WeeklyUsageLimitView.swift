@@ -179,14 +179,6 @@ struct WeeklyUsageLimitEditor: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                Circle().fill(UsagePalette.accent(for: provider).opacity(0.13))
-                Image(systemName: "gauge.with.dots.needle.33percent")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(UsagePalette.accent(for: provider))
-            }
-            .frame(width: 42, height: 42)
-
             VStack(alignment: .leading, spacing: 4) {
                 Text(existingLimit == nil ? "Set weekly usage limit" : "Edit weekly usage limit")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
