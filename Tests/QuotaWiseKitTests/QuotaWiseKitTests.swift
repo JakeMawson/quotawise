@@ -5,6 +5,45 @@ import XCTest
 @testable import QuotaWiseKit
 
 final class QuotaWiseKitTests: XCTestCase {
+    func testCodexReserveVisibilityTracksThePrimaryWeeklyAllowance() {
+        let reset = Date(timeIntervalSince1970: 1_800_000_000)
+        let reserve = Self.limitBucket(id: "gpt-reserve", resetAt: reset, usedPercent: 22)
+        let activePrimary = Self.limitBucket(id: "codex", resetAt: reset, usedPercent: 40)
+        let exhaustedPrimary = Self.limitBucket(id: "codex", resetAt: reset, usedPercent: 100)
+
+        XCTAssertEqual(
+            CodexLimitDisplay.visibleBuckets(from: [activePrimary, reserve]).map(\.id),
+            ["codex"]
+        )
+        XCTAssertEqual(
+            CodexLimitDisplay.visibleBuckets(from: [exhaustedPrimary, reserve]).map(\.id),
+            ["codex", "gpt-reserve"]
+        )
+
+        let displayNamedPrimary = LimitBucket(
+            id: "primary-plan-limit",
+            provider: .codex,
+            displayName: "Codex",
+            planType: nil,
+            windows: [Self.limitBucket(id: "fixture", resetAt: reset, usedPercent: 40).windows[0]],
+            confidence: .exact,
+            sourceDescription: "fixture"
+        )
+        let displayNamedReserve = LimitBucket(
+            id: "reserve-plan-limit",
+            provider: .codex,
+            displayName: "gpt-reserve",
+            planType: nil,
+            windows: reserve.windows,
+            confidence: .exact,
+            sourceDescription: "fixture"
+        )
+        XCTAssertEqual(
+            CodexLimitDisplay.visibleBuckets(from: [displayNamedPrimary, displayNamedReserve]).map(\.id),
+            ["primary-plan-limit"]
+        )
+    }
+
     func testStatusItemAvailabilityRecoversOnlyForUnavailableItems() {
         XCTAssertFalse(
             StatusItemAvailability.requiresRecovery(
@@ -464,6 +503,10 @@ final class QuotaWiseKitTests: XCTestCase {
 
     func testScannerDeduplicatesClaudeMessagesPreservesTimestampsAndUsesCodexCumulativeDeltas() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let formatter = ISO8601DateFormatter()
+        let firstEvent = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 120)
+        let secondEvent = firstEvent.addingTimeInterval(60)
+        let claudeEvent = firstEvent.addingTimeInterval(3_600)
         let codex = root.appending(path: ".codex")
         let claude = root.appending(path: ".claude")
         let codexSessions = codex.appending(path: "sessions")
@@ -472,16 +515,16 @@ final class QuotaWiseKitTests: XCTestCase {
         try FileManager.default.createDirectory(at: claudeProjects, withIntermediateDirectories: true)
 
         let codexLines: [[String: Any]] = [
-            ["timestamp": "2026-08-01T00:00:00Z", "type": "session_meta", "payload": ["id": "session-1", "cwd": "/tmp/Example"]],
-            ["timestamp": "2026-08-01T00:00:01Z", "type": "turn_context", "payload": ["model": "gpt-5.6-sol", "cwd": "/tmp/Example"]],
-            Self.tokenLine(timestamp: "2026-08-01T00:01:00Z", input: 100, cached: 20, output: 10),
-            Self.tokenLine(timestamp: "2026-08-01T00:02:00Z", input: 180, cached: 30, output: 25),
+            ["timestamp": formatter.string(from: firstEvent.addingTimeInterval(-60)), "type": "session_meta", "payload": ["id": "session-1", "cwd": "/tmp/Example"]],
+            ["timestamp": formatter.string(from: firstEvent.addingTimeInterval(-59)), "type": "turn_context", "payload": ["model": "gpt-5.6-sol", "cwd": "/tmp/Example"]],
+            Self.tokenLine(timestamp: formatter.string(from: firstEvent), input: 100, cached: 20, output: 10),
+            Self.tokenLine(timestamp: formatter.string(from: secondEvent), input: 180, cached: 30, output: 25),
         ]
         let codexSessionURL = codexSessions.appending(path: "session.jsonl")
         try writeJSONLines(codexLines, to: codexSessionURL)
 
         let claudeMessage: [String: Any] = [
-            "timestamp": "2026-08-01T01:00:00Z",
+            "timestamp": formatter.string(from: claudeEvent),
             "type": "assistant",
             "uuid": "row-1",
             "cwd": "/tmp/ClaudeExample",
@@ -498,7 +541,7 @@ final class QuotaWiseKitTests: XCTestCase {
             ],
         ]
         let claudeReset: [String: Any] = [
-            "timestamp": "2026-08-01T01:10:00Z",
+            "timestamp": formatter.string(from: claudeEvent.addingTimeInterval(600)),
             "type": "assistant",
             "uuid": "reset-row",
             "cwd": "/tmp/ClaudeExample",
@@ -516,10 +559,7 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertEqual(result.events.filter { $0.provider == .codex }.count, 2)
         XCTAssertEqual(
             result.events.filter { $0.provider == .codex }.map(\.timestamp),
-            [
-                try XCTUnwrap(Date.parseUsageTimestamp("2026-08-01T00:01:00Z")),
-                try XCTUnwrap(Date.parseUsageTimestamp("2026-08-01T00:02:00Z")),
-            ]
+            [firstEvent, secondEvent]
         )
         XCTAssertEqual(result.events.filter { $0.provider == .claude }.count, 1)
         XCTAssertEqual(result.events.filter { $0.provider == .codex }.reduce(0) { $0 + $1.tokens.input }, 150)
@@ -528,7 +568,7 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertEqual(result.resetEvents.filter { $0.provider == .claude }.count, 1)
 
         try appendJSONLine(
-            Self.tokenLine(timestamp: "2026-08-01T00:03:00Z", input: 250, cached: 40, output: 30),
+            Self.tokenLine(timestamp: formatter.string(from: secondEvent.addingTimeInterval(60)), input: 250, cached: 40, output: 30),
             to: codexSessionURL
         )
         let appended = await scanner.scanAll()

@@ -7,14 +7,46 @@ struct EditingLimitTarget: Identifiable {
     var id: String { existingLimit?.id.uuidString ?? "new-\(provider.rawValue)" }
 }
 
+enum CodexLimitDisplay {
+    /// The reserve is the fallback Codex allowance. Once the primary weekly
+    /// allowance has capacity, showing both cards makes the compact panel
+    /// unnecessarily tall without adding a decision the user needs to make.
+    static func visibleBuckets(from buckets: [LimitBucket]) -> [LimitBucket] {
+        let primaryWeeklyLimitHasCapacity = buckets.contains { bucket in
+            isPrimaryCodexBucket(bucket)
+                && bucket.windows.contains { window in
+                    window.kind == .weekly && window.remainingPercent > 0
+                }
+        }
+
+        guard primaryWeeklyLimitHasCapacity else { return buckets }
+        return buckets.filter { !isReserveBucket($0) }
+    }
+
+    private static func isPrimaryCodexBucket(_ bucket: LimitBucket) -> Bool {
+        bucket.id.caseInsensitiveCompare("codex") == .orderedSame
+            || bucket.displayName.caseInsensitiveCompare("codex") == .orderedSame
+    }
+
+    private static func isReserveBucket(_ bucket: LimitBucket) -> Bool {
+        bucket.id.caseInsensitiveCompare("gpt-reserve") == .orderedSame
+            || bucket.displayName.caseInsensitiveCompare("gpt-reserve") == .orderedSame
+    }
+}
+
 public struct MenuBarPanel: View {
     @ObservedObject private var model: UsageApplicationModel
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var editingLimitTarget: EditingLimitTarget?
     @State private var notificationAuthorizationState: NotificationAuthorizationState = .allowed
+    @State private var scrollPosition: String? = ScrollTarget.top
     @Environment(\.dismiss) private var dismiss
     private let onOpenStudio: (() -> Void)?
+
+    private enum ScrollTarget {
+        static let top = "menu-panel-top"
+    }
 
     public init(model: UsageApplicationModel, onOpenStudio: (() -> Void)? = nil) {
         self.model = model
@@ -31,30 +63,41 @@ public struct MenuBarPanel: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 16) {
-                ProviderSlider(selection: $model.selectedProvider)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(spacing: 16) {
+                        ProviderSlider(selection: $model.selectedProvider)
 
-                VStack(spacing: 8) {
-                    if model.isIndexingHistory {
-                        indexingNotice
+                        VStack(spacing: 8) {
+                            if model.isIndexingHistory {
+                                indexingNotice
+                            }
+
+                            runwayHeader
+                                .providerContentAnimation(enabled: !reduceMotion)
+                        }
+
+                        limitSection
+
+                        if !model.isIndexingHistory {
+                            historySection
+                                .providerContentAnimation(enabled: !reduceMotion)
+                        }
+
+                        usageLimitControls
                     }
-
-                    runwayHeader
-                        .providerContentAnimation(enabled: !reduceMotion)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 18)
+                    .padding(.bottom, 14)
+                    .id(ScrollTarget.top)
                 }
-
-                limitSection
-
-                if !model.isIndexingHistory {
-                    historySection
-                        .providerContentAnimation(enabled: !reduceMotion)
-                }
-
-                usageLimitControls
+                .scrollIndicators(.visible)
+                .defaultScrollAnchor(.top)
+                .scrollPosition(id: $scrollPosition, anchor: .top)
+                .frame(height: maximumScrollViewportHeight)
+                .onAppear { scrollToTop(proxy) }
+                .onChange(of: model.selectedProvider) { _, _ in scrollToTop(proxy) }
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 18)
-            .padding(.bottom, 14)
 
             Divider().overlay(UsagePalette.hairline)
 
@@ -167,7 +210,7 @@ public struct MenuBarPanel: View {
 
     @ViewBuilder
     private var limitSection: some View {
-        let limits = model.limits(for: model.selectedProvider)
+        let limits = CodexLimitDisplay.visibleBuckets(from: model.limits(for: model.selectedProvider))
         if limits.isEmpty {
             EmptyLimitNotice(provider: model.selectedProvider)
         } else {
@@ -318,6 +361,19 @@ public struct MenuBarPanel: View {
 
     private var providerTransitionAnimation: Animation? {
         reduceMotion ? nil : .easeInOut(duration: 0.22)
+    }
+
+    private var maximumScrollViewportHeight: CGFloat {
+        let availableHeight = NSScreen.main?.visibleFrame.height ?? 820
+        return min(700, max(460, availableHeight - 140))
+    }
+
+    private func scrollToTop(_ proxy: ScrollViewProxy) {
+        scrollPosition = ScrollTarget.top
+        DispatchQueue.main.async {
+            scrollPosition = ScrollTarget.top
+            proxy.scrollTo(ScrollTarget.top, anchor: .top)
+        }
     }
 }
 
