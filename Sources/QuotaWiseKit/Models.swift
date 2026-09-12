@@ -115,6 +115,12 @@ struct ResetEvent: Identifiable, Codable, Hashable, Sendable {
         let normalizedBucketID = bucketID.lowercased()
         return normalizedBucketID.contains("spark") || normalizedBucketID.contains("bengalfox")
     }
+
+    /// The reserve allowance can still contribute to limit and reset state, but
+    /// its reset is not a usage-chart seam.
+    var isGPTReserveReset: Bool {
+        bucketID.caseInsensitiveCompare("gpt-reserve") == .orderedSame
+    }
 }
 
 /// A display-only seam that can represent one reset or several plan resets

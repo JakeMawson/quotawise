@@ -1257,6 +1257,35 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertEqual(result.map(\.id), ["weekly-inside"])
     }
 
+    func testWeeklyMarkersExcludeGPTReserveResetsButKeepPrimaryResets() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let period = UsagePeriod(start: start, end: start.addingTimeInterval(5 * 3_600))
+        let primary = Self.resetEvent(
+            id: "primary-weekly",
+            date: start.addingTimeInterval(2 * 3_600),
+            confidence: .exact,
+            kind: .weekly
+        )
+        let reserve = Self.resetEvent(
+            id: "reserve-weekly",
+            date: start.addingTimeInterval(3 * 3_600),
+            confidence: .exact,
+            kind: .weekly,
+            bucketID: "GPT-RESERVE"
+        )
+
+        let result = UsageApplicationModel.observedResetMarkers(
+            from: [reserve, primary],
+            provider: .codex,
+            kind: .weekly,
+            period: period,
+            now: period.end
+        )
+
+        XCTAssertEqual(result.map(\.id), ["primary-weekly"])
+        XCTAssertTrue(reserve.isGPTReserveReset)
+    }
+
     func testWeeklyBackfillUsesOneSeamPerWeekWhenMultipleBucketsHaveDifferentResetTimes() async {
         let week = TimeInterval(7 * 24 * 3_600)
         let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -1807,6 +1836,77 @@ final class QuotaWiseKitTests: XCTestCase {
         .background(UsagePalette.nightInk)
         .environment(\.colorScheme, .dark)
         try Self.writeRenderedPNG(studioContext, named: "credit-flow-point-hover-left-edge-studio-context@4x.png", to: outputDirectory)
+    }
+
+    @MainActor
+    func testGPTReserveResetsDoNotRenderOnUsageChartsForQA() throws {
+        guard let outputDirectory = ProcessInfo.processInfo.environment["AI_USAGE_QA_OUTPUT_DIR"]
+            .map(URL.init(fileURLWithPath:)) else { return }
+
+        let start = Date(timeIntervalSince1970: 1_799_000_000)
+        let points = (0..<30).map { day in
+            let credits = [8.0, 13, 7, 6, 28, 11, 5, 9, 15, 7][day % 10]
+            return UsageChartPoint(
+                date: start.addingTimeInterval(Double(day) * 86_400),
+                credits: credits,
+                apiEquivalentUSD: credits / 100,
+                tokens: Int64(credits * 1_000)
+            )
+        }
+        let primaryReset = Self.resetEvent(
+            id: "primary-visible",
+            date: start.addingTimeInterval(8 * 86_400),
+            confidence: .exact,
+            kind: .weekly
+        )
+        let reserveReset = Self.resetEvent(
+            id: "gpt-reserve-hidden",
+            date: start.addingTimeInterval(15 * 86_400),
+            confidence: .exact,
+            kind: .weekly,
+            bucketID: "gpt-reserve"
+        )
+        let laterPrimaryReset = Self.resetEvent(
+            id: "primary-visible-later",
+            date: start.addingTimeInterval(22 * 86_400),
+            confidence: .estimated,
+            kind: .weekly
+        )
+        let visibleResets = UsageApplicationModel.observedResetMarkers(
+            from: [primaryReset, reserveReset, laterPrimaryReset],
+            provider: .codex,
+            kind: .weekly,
+            period: UsagePeriod(start: start, end: start.addingTimeInterval(30 * 86_400)),
+            now: start.addingTimeInterval(30 * 86_400)
+        )
+
+        XCTAssertEqual(visibleResets.map(\.id), [primaryReset.id, laterPrimaryReset.id])
+
+        let compactChart = UsageAreaChart(
+            points: points,
+            resets: visibleResets,
+            provider: .codex,
+            compact: true
+        )
+        .frame(width: 364, height: 150)
+        .padding(14)
+        .background(UsagePalette.nightInk)
+        .environment(\.colorScheme, .dark)
+
+        let expandedChart = UsageAreaChart(
+            points: points,
+            resets: visibleResets,
+            provider: .codex,
+            compact: false,
+            initialHoveredReset: primaryReset
+        )
+        .frame(width: 620, height: 300)
+        .padding(20)
+        .background(UsagePalette.nightInk)
+        .environment(\.colorScheme, .dark)
+
+        try Self.writeRenderedPNG(compactChart, named: "gpt-reserve-reset-hidden-compact@4x.png", to: outputDirectory)
+        try Self.writeRenderedPNG(expandedChart, named: "gpt-reserve-reset-hidden-expanded@4x.png", to: outputDirectory)
     }
 
     func testHistoryResetDeduplicationDoesNotCollapseSameDaySessions() {

@@ -656,6 +656,7 @@ public final class UsageApplicationModel: ObservableObject {
         let observed = resetEvents.filter {
             $0.provider == provider
                 && $0.kind == kind
+                && !$0.isGPTReserveReset
                 && period.contains($0.date)
                 && $0.date <= now
         }
