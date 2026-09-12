@@ -501,6 +501,64 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertEqual(buckets.last?.displayName, "Spark")
     }
 
+    func testCodexLiveLimitDecoderPreservesEarnedResetCreditAvailability() throws {
+        let response: [String: Any] = [
+            "id": 2,
+            "result": [
+                "rateLimitsByLimitId": [
+                    "codex": [
+                        "limitId": "codex",
+                        "primary": [
+                            "usedPercent": 12,
+                            "windowDurationMins": 10_080,
+                            "resetsAt": 1_800_000_000,
+                        ],
+                    ],
+                ],
+                "rateLimitResetCredits": [
+                    "availableCount": 2,
+                    "credits": [
+                        [
+                            "id": "opaque-credit-a",
+                            "resetType": "codexRateLimits",
+                            "status": "available",
+                            "grantedAt": 1_799_000_000,
+                            "expiresAt": 1_801_000_000,
+                            "title": "Full reset",
+                            "description": "Reset the eligible Codex window.",
+                        ],
+                    ],
+                ],
+            ],
+        ]
+
+        let live = try CodexAppServerClient.decodeLiveLimitResponse(response)
+        XCTAssertEqual(live.limits.first?.id, "codex")
+        XCTAssertEqual(live.earnedResetCredits?.availableCount, 2)
+        XCTAssertEqual(live.earnedResetCredits?.credits?.count, 1)
+        XCTAssertEqual(live.earnedResetCredits?.credits?.first?.resetType, "codexRateLimits")
+        XCTAssertEqual(
+            live.earnedResetCredits?.credits?.first?.grantedAt,
+            Date(timeIntervalSince1970: 1_799_000_000)
+        )
+
+        var countOnlyResponse = response
+        var countOnlyResult = try XCTUnwrap(countOnlyResponse["result"] as? [String: Any])
+        var countOnlyCredits = try XCTUnwrap(countOnlyResult["rateLimitResetCredits"] as? [String: Any])
+        countOnlyCredits["credits"] = NSNull()
+        countOnlyResult["rateLimitResetCredits"] = countOnlyCredits
+        countOnlyResponse["result"] = countOnlyResult
+        let countOnly = try CodexAppServerClient.decodeLiveLimitResponse(countOnlyResponse)
+        XCTAssertEqual(countOnly.earnedResetCredits?.availableCount, 2)
+        XCTAssertNil(countOnly.earnedResetCredits?.credits)
+
+        var absentResponse = response
+        var absentResult = try XCTUnwrap(absentResponse["result"] as? [String: Any])
+        absentResult.removeValue(forKey: "rateLimitResetCredits")
+        absentResponse["result"] = absentResult
+        XCTAssertNil(try CodexAppServerClient.decodeLiveLimitResponse(absentResponse).earnedResetCredits)
+    }
+
     func testScannerDeduplicatesClaudeMessagesPreservesTimestampsAndUsesCodexCumulativeDeltas() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         let formatter = ISO8601DateFormatter()
@@ -1286,6 +1344,646 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertTrue(reserve.isGPTReserveReset)
     }
 
+    func testLegacyResetOriginFallsBackToObserved() throws {
+        let legacyJSON = #"""
+        {
+          "id": "legacy-reset",
+          "provider": "codex",
+          "date": "2026-09-12T07:45:04Z",
+          "detectedAt": "2026-09-12T07:45:35Z",
+          "kind": "weekly",
+          "bucketID": "codex",
+          "label": "codex weekly reset",
+          "confidence": "exact"
+        }
+        """#
+        let reset = try JSONDecoder.usageDecoder.decode(ResetEvent.self, from: Data(legacyJSON.utf8))
+
+        XCTAssertNil(reset.origin)
+        XCTAssertEqual(reset.resolvedOrigin, .observed)
+        XCTAssertFalse(reset.isManualReset)
+        XCTAssertFalse(reset.isIssuedReset)
+    }
+
+    func testLegacyManualResetDefaultsToUserConfirmedEvidence() throws {
+        let legacyJSON = #"""
+        {
+          "id": "legacy-manual-reset",
+          "provider": "codex",
+          "date": "2026-09-12T07:45:04Z",
+          "detectedAt": "2026-09-12T07:45:35Z",
+          "kind": "weekly",
+          "bucketID": "codex",
+          "label": "codex weekly reset",
+          "confidence": "exact",
+          "origin": "manual"
+        }
+        """#
+        let reset = try JSONDecoder.usageDecoder.decode(ResetEvent.self, from: Data(legacyJSON.utf8))
+
+        XCTAssertNil(reset.originEvidence)
+        XCTAssertEqual(reset.resolvedOriginEvidence, .userConfirmed)
+        XCTAssertEqual(reset.manualResetEvidenceText, "Manual reset · user-confirmed")
+    }
+
+    func testCreditConsumedManualResetKeepsDistinctEvidenceText() {
+        let reset = Self.resetEvent(
+            id: "credit-consumed-reset",
+            date: Date(timeIntervalSince1970: 1_800_000_000),
+            confidence: .exact,
+            kind: .weekly,
+            origin: .manual,
+            originEvidence: .resetCreditConsumed,
+            originCreditID: "opaque-credit"
+        )
+
+        XCTAssertTrue(reset.isManualReset)
+        XCTAssertTrue(reset.isCreditConsumedManualReset)
+        XCTAssertEqual(reset.resolvedOriginEvidence, .resetCreditConsumed)
+        XCTAssertEqual(reset.manualResetEvidenceText, "Manual reset · reset credit consumed")
+    }
+
+    func testSnapshotResetReconciliationPrunesShortDeadlineCorrectionAndKeepsManualOrigin() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let actualObservation = firstObservation.addingTimeInterval(60)
+        let correctionProbe = actualObservation.addingTimeInterval(24 * 60)
+        let correctionObservation = correctionProbe.addingTimeInterval(60)
+        let beforeResetBoundary = firstObservation.addingTimeInterval(3 * 24 * 3_600)
+        let afterResetBoundary = actualObservation.addingTimeInterval(7 * 24 * 3_600)
+        let fileURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString)
+            .appending(path: "limit-snapshots.json")
+        let store = LimitSnapshotStore(fileURL: fileURL)
+
+        _ = await store.observe(
+            [Self.limitBucket(id: "codex", resetAt: beforeResetBoundary, usedPercent: 99)],
+            at: firstObservation
+        )
+        let actualResets = await store.observe(
+            [Self.limitBucket(id: "codex", resetAt: afterResetBoundary, usedPercent: 0)],
+            at: actualObservation
+        )
+        let actual = try XCTUnwrap(actualResets.first { $0.confidence == .exact })
+
+        _ = await store.observe(
+            [Self.limitBucket(id: "codex", resetAt: afterResetBoundary.addingTimeInterval(60), usedPercent: 1)],
+            at: correctionProbe
+        )
+        let observed = await store.observe(
+            [Self.limitBucket(id: "codex", resetAt: afterResetBoundary.addingTimeInterval(24 * 60), usedPercent: 0)],
+            at: correctionObservation
+        )
+        XCTAssertEqual(observed.map(\.id), [actual.id])
+
+        // Model the old persisted state that contained the false 23-minute
+        // correction as its own snapshot reset before this migration existed.
+        var persisted = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any]
+        )
+        var persistedResets = try XCTUnwrap(persisted["resets"] as? [[String: Any]])
+        var correction = try XCTUnwrap(persistedResets.first { ($0["id"] as? String) == actual.id })
+        let formatter = ISO8601DateFormatter()
+        correction["id"] = "snapshot:codex:codex:10080:\(Int(correctionObservation.timeIntervalSince1970))"
+        correction["date"] = formatter.string(from: correctionObservation)
+        correction["detectedAt"] = formatter.string(from: correctionObservation)
+        persistedResets.append(correction)
+        persisted["resets"] = persistedResets
+        try JSONSerialization.data(withJSONObject: persisted, options: [.sortedKeys])
+            .write(to: fileURL, options: .atomic)
+
+        let reloadedStore = LimitSnapshotStore(fileURL: fileURL)
+        let reconciled = await reloadedStore.storedResets()
+        XCTAssertEqual(reconciled.map(\.id), [actual.id])
+        XCTAssertEqual(reconciled.first?.resolvedOrigin, .observed)
+
+        let marked = await reloadedStore.markManualReset(forID: actual.id)
+        XCTAssertTrue(marked)
+        let userConfirmed = await reloadedStore.storedResets()
+        XCTAssertEqual(userConfirmed.map(\.id), [actual.id])
+        XCTAssertEqual(userConfirmed.first?.resolvedOrigin, .manual)
+        XCTAssertTrue(userConfirmed.first?.isManualReset == true)
+    }
+
+    func testLimitSnapshotStoreStillRecognizesShortSessionReset() async {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(5 * 60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(2 * 3_600),
+                usedPercent: 94,
+                durationMinutes: 60
+            )],
+            at: firstObservation
+        )
+        let resets = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(2 * 3_600 + 45 * 60),
+                usedPercent: 0,
+                durationMinutes: 60
+            )],
+            at: secondObservation
+        )
+
+        XCTAssertEqual(resets.count, 1)
+        XCTAssertEqual(resets.first?.kind, .session)
+    }
+
+    func testCreditConsumptionCorrelationMarksOneFreshPrimaryResetManual() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "opaque-credit-a",
+            grantedAt: firstObservation.addingTimeInterval(-60),
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(
+            Self.resetCreditAvailability([credit]),
+            at: firstObservation
+        )
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        let reset = try XCTUnwrap(resets.first { $0.bucketID == "codex" && $0.confidence == .exact })
+        XCTAssertEqual(reset.resolvedOrigin, .manual)
+        XCTAssertEqual(reset.resolvedOriginEvidence, .resetCreditConsumed)
+        XCTAssertEqual(reset.originCreditID, credit.id)
+        XCTAssertEqual(reset.manualResetEvidenceText, "Manual reset · reset credit consumed")
+
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.count, 1)
+        XCTAssertEqual(journal.first?.id, credit.id)
+        XCTAssertEqual(journal.first?.resetType, "codexRateLimits")
+        XCTAssertEqual(journal.first?.grantedAt, credit.grantedAt)
+        XCTAssertEqual(journal.first?.lifecycle, .consumed)
+        XCTAssertEqual(journal.first?.associatedResetID, reset.id)
+    }
+
+    func testExpiredCreditDisappearanceLeavesPrimaryResetObserved() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(id: "expired-credit", expiresAt: secondObservation)
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        let reset = try XCTUnwrap(resets.first)
+        XCTAssertEqual(reset.resolvedOrigin, .observed)
+        XCTAssertNil(reset.originCreditID)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .expired)
+        XCTAssertNil(journal.first?.associatedResetID)
+    }
+
+    func testCreditDisappearanceWithoutUsageResetIsStoredButNotAttributed() async {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "unmatched-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        XCTAssertTrue(resets.isEmpty)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .unattributed)
+        XCTAssertNil(journal.first?.associatedResetID)
+    }
+
+    func testCountOnlyCreditResponseCannotAttributeAReset() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "count-only-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability(nil, availableCount: 0),
+            at: secondObservation
+        )
+
+        XCTAssertEqual(try XCTUnwrap(resets.first).resolvedOrigin, .observed)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .available)
+    }
+
+    func testChangedCreditIDWithoutAuthoritativeCountDecreaseCannotAttributeAReset() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let firstCredit = Self.resetCredit(
+            id: "first-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+        let replacementCredit = Self.resetCredit(
+            id: "replacement-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([firstCredit]), at: firstObservation)
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([replacementCredit]),
+            at: secondObservation
+        )
+
+        XCTAssertEqual(try XCTUnwrap(resets.first).resolvedOrigin, .observed)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first { $0.id == firstCredit.id }?.lifecycle, .unattributed)
+        XCTAssertEqual(journal.first { $0.id == replacementCredit.id }?.lifecycle, .available)
+    }
+
+    func testStaleCreditObservationRecordsUnattributedDisappearanceWithoutChangingReset() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(4 * 60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "stale-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        XCTAssertEqual(try XCTUnwrap(resets.first).resolvedOrigin, .observed)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .unattributed)
+    }
+
+    func testMultipleDisappearingCreditsCannotAttributeOneReset() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credits = [
+            Self.resetCredit(id: "credit-a", expiresAt: secondObservation.addingTimeInterval(24 * 3_600)),
+            Self.resetCredit(id: "credit-b", expiresAt: secondObservation.addingTimeInterval(24 * 3_600)),
+        ]
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(Self.resetCreditAvailability(credits), at: firstObservation)
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        XCTAssertEqual(try XCTUnwrap(resets.first).resolvedOrigin, .observed)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(
+            Set(journal.map(\.lifecycle)),
+            [.unattributed]
+        )
+    }
+
+    func testMultipleFreshPrimaryResetsCannotAttributeOneCredit() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "ambiguous-reset-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+        let before = LimitBucket(
+            id: "codex",
+            provider: .codex,
+            displayName: "Codex",
+            planType: nil,
+            windows: [
+                RateLimitWindow(
+                    usedPercent: 94,
+                    durationMinutes: 60,
+                    resetsAt: firstObservation.addingTimeInterval(2 * 3_600),
+                    confidence: .exact,
+                    estimateBasis: nil
+                ),
+                RateLimitWindow(
+                    usedPercent: 99,
+                    durationMinutes: 10_080,
+                    resetsAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                    confidence: .exact,
+                    estimateBasis: nil
+                ),
+            ],
+            confidence: .exact,
+            sourceDescription: "test"
+        )
+        let after = LimitBucket(
+            id: "codex",
+            provider: .codex,
+            displayName: "Codex",
+            planType: nil,
+            windows: [
+                RateLimitWindow(
+                    usedPercent: 0,
+                    durationMinutes: 60,
+                    resetsAt: secondObservation.addingTimeInterval(3 * 3_600),
+                    confidence: .exact,
+                    estimateBasis: nil
+                ),
+                RateLimitWindow(
+                    usedPercent: 0,
+                    durationMinutes: 10_080,
+                    resetsAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                    confidence: .exact,
+                    estimateBasis: nil
+                ),
+            ],
+            confidence: .exact,
+            sourceDescription: "test"
+        )
+
+        _ = await store.observe([before], at: firstObservation)
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        _ = await store.observe([after], at: secondObservation)
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        XCTAssertEqual(resets.filter { $0.confidence == .exact }.count, 2)
+        XCTAssertTrue(resets.allSatisfy { $0.resolvedOrigin == .observed })
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .unattributed)
+    }
+
+    func testCreditCorrelationRejectsReserveAndSparkOnlyResetEvents() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "nonprimary-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+        let before = [
+            Self.limitBucket(
+                id: "gpt-reserve",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            ),
+            Self.limitBucket(
+                id: "codex_bengalfox",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            ),
+        ]
+        let after = [
+            Self.limitBucket(
+                id: "gpt-reserve",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            ),
+            Self.limitBucket(
+                id: "codex_bengalfox",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            ),
+        ]
+
+        _ = await store.observe(before, at: firstObservation)
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        _ = await store.observe(after, at: secondObservation)
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        XCTAssertEqual(Set(resets.map(\.bucketID)), ["gpt-reserve", "codex_bengalfox"])
+        XCTAssertTrue(resets.allSatisfy { $0.resolvedOrigin == .observed })
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .unattributed)
+    }
+
+    func testCreditCorrelationDoesNotOverwriteUserConfirmedManualReset() async throws {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let secondObservation = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "already-provenanced-credit",
+            expiresAt: secondObservation.addingTimeInterval(24 * 3_600)
+        )
+
+        _ = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: firstObservation.addingTimeInterval(3 * 24 * 3_600),
+                usedPercent: 99
+            )],
+            at: firstObservation
+        )
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        let detected = await store.observe(
+            [Self.limitBucket(
+                id: "codex",
+                resetAt: secondObservation.addingTimeInterval(10 * 24 * 3_600),
+                usedPercent: 0
+            )],
+            at: secondObservation
+        )
+        let detectedID = try XCTUnwrap(detected.first?.id)
+        let marked = await store.markManualReset(forID: detectedID)
+        XCTAssertTrue(marked)
+        let resets = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: secondObservation
+        )
+
+        let reset = try XCTUnwrap(resets.first { $0.id == detectedID })
+        XCTAssertEqual(reset.resolvedOriginEvidence, .userConfirmed)
+        XCTAssertNil(reset.originCreditID)
+        let journal = await store.storedResetCredits()
+        XCTAssertEqual(journal.first?.lifecycle, .unattributed)
+        XCTAssertNil(journal.first?.associatedResetID)
+    }
+
+    func testCreditJournalPrunesOldTerminalRecordsButKeepsNoUIState() async {
+        let firstObservation = Date(timeIntervalSince1970: 1_800_000_000)
+        let disappearedAt = firstObservation.addingTimeInterval(60)
+        let store = LimitSnapshotStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString)
+                .appending(path: "limit-snapshots.json")
+        )
+        let credit = Self.resetCredit(
+            id: "retained-then-pruned-credit",
+            expiresAt: firstObservation.addingTimeInterval(10)
+        )
+
+        _ = await store.observeResetCredits(Self.resetCreditAvailability([credit]), at: firstObservation)
+        _ = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: disappearedAt
+        )
+        let expiredJournal = await store.storedResetCredits()
+        XCTAssertEqual(expiredJournal.first?.lifecycle, .expired)
+
+        _ = await store.observeResetCredits(
+            Self.resetCreditAvailability([], availableCount: 0),
+            at: firstObservation.addingTimeInterval(91 * 24 * 3_600)
+        )
+        let prunedJournal = await store.storedResetCredits()
+        XCTAssertTrue(prunedJournal.isEmpty)
+    }
+
     func testWeeklyBackfillUsesOneSeamPerWeekWhenMultipleBucketsHaveDifferentResetTimes() async {
         let week = TimeInterval(7 * 24 * 3_600)
         let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -1670,6 +2368,28 @@ final class QuotaWiseKitTests: XCTestCase {
         XCTAssertEqual(seams[0].events.map(\.id), ["codex-weekly", "spark-weekly"])
     }
 
+    func testResetSeamsPrioritizeUserConfirmedManualOrigin() {
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        let observed = Self.resetEvent(
+            id: "observed",
+            date: date,
+            confidence: .exact,
+            kind: .weekly
+        )
+        let manual = Self.resetEvent(
+            id: "manual",
+            date: date,
+            confidence: .exact,
+            kind: .weekly,
+            origin: .manual
+        )
+
+        let seam = try! XCTUnwrap(ResetSeam.group([observed, manual]).first)
+        XCTAssertTrue(seam.containsManualReset)
+        XCTAssertFalse(seam.containsIssuedReset)
+        XCTAssertEqual(seam.events.map(\.id), [manual.id, observed.id])
+    }
+
     func testResetSeamsKeepStandalonePrimaryAndSparkMarkersSeparate() {
         let base = Date(timeIntervalSince1970: 1_800_000_000)
         let primary = Self.resetEvent(
@@ -1907,6 +2627,115 @@ final class QuotaWiseKitTests: XCTestCase {
 
         try Self.writeRenderedPNG(compactChart, named: "gpt-reserve-reset-hidden-compact@4x.png", to: outputDirectory)
         try Self.writeRenderedPNG(expandedChart, named: "gpt-reserve-reset-hidden-expanded@4x.png", to: outputDirectory)
+    }
+
+    @MainActor
+    func testUserConfirmedManualResetRendersForQA() throws {
+        guard let outputDirectory = ProcessInfo.processInfo.environment["AI_USAGE_QA_OUTPUT_DIR"]
+            .map(URL.init(fileURLWithPath:)) else { return }
+
+        let start = Date(timeIntervalSince1970: 1_799_000_000)
+        let points = (0..<30).map { day in
+            let credits = [8.0, 13, 7, 6, 28, 11, 5, 9, 15, 7][day % 10]
+            return UsageChartPoint(
+                date: start.addingTimeInterval(Double(day) * 86_400),
+                credits: credits,
+                apiEquivalentUSD: credits / 100,
+                tokens: Int64(credits * 1_000)
+            )
+        }
+        let observed = Self.resetEvent(
+            id: "observed-reset",
+            date: start.addingTimeInterval(8 * 86_400),
+            confidence: .exact,
+            kind: .weekly
+        )
+        let manual = Self.resetEvent(
+            id: "manual-confirmed-reset",
+            date: start.addingTimeInterval(15 * 86_400),
+            confidence: .exact,
+            kind: .weekly,
+            origin: .manual
+        )
+        let creditConsumed = Self.resetEvent(
+            id: "manual-credit-consumed-reset",
+            date: start.addingTimeInterval(19 * 86_400),
+            confidence: .exact,
+            kind: .weekly,
+            origin: .manual,
+            originEvidence: .resetCreditConsumed,
+            originCreditID: "opaque-qa-credit"
+        )
+        let reserve = Self.resetEvent(
+            id: "gpt-reserve-hidden",
+            date: start.addingTimeInterval(22 * 86_400),
+            confidence: .exact,
+            kind: .weekly,
+            bucketID: "gpt-reserve"
+        )
+        let visibleResets = UsageApplicationModel.observedResetMarkers(
+            from: [observed, manual, creditConsumed, reserve],
+            provider: .codex,
+            kind: .weekly,
+            period: UsagePeriod(start: start, end: start.addingTimeInterval(30 * 86_400)),
+            now: start.addingTimeInterval(30 * 86_400)
+        )
+        XCTAssertEqual(visibleResets.map(\.id), [observed.id, manual.id, creditConsumed.id])
+
+        let compactCard = VStack(alignment: .leading, spacing: 10) {
+            Text("30-DAY CREDIT FLOW")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .tracking(1.1)
+                .foregroundStyle(UsagePalette.secondaryText)
+            UsageAreaChart(points: points, resets: visibleResets, provider: .codex, compact: true)
+                .frame(height: 132)
+        }
+        .frame(width: 364)
+        .padding(16)
+        .background(UsagePalette.nightInk)
+        .environment(\.colorScheme, .dark)
+
+        let expandedChart = UsageAreaChart(
+            points: points,
+            resets: visibleResets,
+            provider: .codex,
+            compact: false,
+            initialHoveredReset: manual
+        )
+        .frame(width: 620, height: 300)
+        .padding(20)
+        .background(UsagePalette.nightInk)
+        .environment(\.colorScheme, .dark)
+
+        let creditConsumedExpandedChart = UsageAreaChart(
+            points: points,
+            resets: visibleResets,
+            provider: .codex,
+            compact: false,
+            initialHoveredReset: creditConsumed
+        )
+        .frame(width: 620, height: 300)
+        .padding(20)
+        .background(UsagePalette.nightInk)
+        .environment(\.colorScheme, .dark)
+
+        let narrowStudio = UsageAreaChart(
+            points: points,
+            resets: visibleResets,
+            provider: .codex,
+            compact: false,
+            initialHoveredReset: creditConsumed
+        )
+        .frame(width: 350, height: 300)
+        .padding(20)
+        .frame(width: 390, height: 844, alignment: .top)
+        .background(UsagePalette.nightInk)
+        .environment(\.colorScheme, .dark)
+
+        try Self.writeRenderedPNG(compactCard, named: "manual-reset-marker-compact@4x.png", to: outputDirectory)
+        try Self.writeRenderedPNG(expandedChart, named: "manual-reset-marker-expanded@4x.png", to: outputDirectory)
+        try Self.writeRenderedPNG(creditConsumedExpandedChart, named: "credit-consumed-reset-marker-expanded@4x.png", to: outputDirectory)
+        try Self.writeRenderedPNG(narrowStudio, named: "credit-consumed-reset-marker-narrow-390x844@4x.png", to: outputDirectory)
     }
 
     func testHistoryResetDeduplicationDoesNotCollapseSameDaySessions() {
@@ -2470,7 +3299,10 @@ final class QuotaWiseKitTests: XCTestCase {
         date: Date,
         confidence: DataConfidence,
         kind: ResetKind = .session,
-        bucketID: String = "codex"
+        bucketID: String = "codex",
+        origin: ResetOrigin? = .observed,
+        originEvidence: ResetOriginEvidence? = nil,
+        originCreditID: String? = nil
     ) -> ResetEvent {
         ResetEvent(
             id: id,
@@ -2480,11 +3312,47 @@ final class QuotaWiseKitTests: XCTestCase {
             kind: kind,
             bucketID: bucketID,
             label: id,
-            confidence: confidence
+            confidence: confidence,
+            origin: origin,
+            originEvidence: originEvidence,
+            originCreditID: originCreditID
         )
     }
 
-    private static func limitBucket(id: String, resetAt: Date, usedPercent: Double = 50) -> LimitBucket {
+    private static func resetCredit(
+        id: String,
+        grantedAt: Date? = nil,
+        expiresAt: Date? = nil,
+        resetType: String = "codexRateLimits",
+        status: String = "available"
+    ) -> CodexEarnedResetCredit {
+        CodexEarnedResetCredit(
+            id: id,
+            resetType: resetType,
+            status: status,
+            grantedAt: grantedAt,
+            expiresAt: expiresAt,
+            title: "Full reset",
+            description: "Reset the eligible Codex window."
+        )
+    }
+
+    private static func resetCreditAvailability(
+        _ credits: [CodexEarnedResetCredit]?,
+        availableCount: Int? = nil
+    ) -> CodexEarnedResetCreditAvailability {
+        CodexEarnedResetCreditAvailability(
+            availableCount: availableCount ?? credits?.count ?? 0,
+            credits: credits
+        )
+    }
+
+    private static func limitBucket(
+        id: String,
+        resetAt: Date,
+        usedPercent: Double = 50,
+        durationMinutes: Int = 10_080
+    ) -> LimitBucket {
         LimitBucket(
             id: id,
             provider: .codex,
@@ -2493,7 +3361,7 @@ final class QuotaWiseKitTests: XCTestCase {
             windows: [
                 RateLimitWindow(
                     usedPercent: usedPercent,
-                    durationMinutes: 10_080,
+                    durationMinutes: durationMinutes,
                     resetsAt: resetAt,
                     confidence: .exact,
                     estimateBasis: nil

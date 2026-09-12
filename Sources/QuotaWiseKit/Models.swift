@@ -98,6 +98,27 @@ enum ResetKind: String, Codable, Sendable {
     case unknown
 }
 
+/// Why a reset is known to have occurred. Older persisted events omit this
+/// field and deliberately resolve to `.observed` rather than being relabelled.
+enum ResetOrigin: String, Codable, Sendable {
+    /// QuotaWise saw the usage window change but the provider did not expose a
+    /// more specific cause.
+    case observed
+    /// A user-confirmed reset action, persisted against the exact reset event.
+    case manual
+    /// A provider-issued reset that has explicit provider provenance.
+    case issued
+}
+
+/// The evidence behind a reset origin. The origin controls graph treatment;
+/// this value keeps independently verifiable user confirmation separate from
+/// a bounded correlation with an earned reset credit.
+enum ResetOriginEvidence: String, Codable, Sendable {
+    case userConfirmed
+    case resetCreditConsumed
+    case providerReported
+}
+
 struct ResetEvent: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let provider: AIProvider
@@ -107,6 +128,48 @@ struct ResetEvent: Identifiable, Codable, Hashable, Sendable {
     let bucketID: String
     let label: String
     let confidence: DataConfidence
+    /// Optional for backward-compatible decoding of reset history written by
+    /// QuotaWise versions before reset provenance existed.
+    var origin: ResetOrigin? = .observed
+    /// Optional for backward-compatible decoding of reset history written
+    /// before QuotaWise recorded the evidence behind an origin.
+    var originEvidence: ResetOriginEvidence?
+    /// Kept only in local persistence for a credit-correlated manual reset.
+    /// This opaque provider identifier is never displayed in QuotaWise.
+    var originCreditID: String?
+
+    var resolvedOrigin: ResetOrigin { origin ?? .observed }
+
+    /// Older manual records were created only by the explicit user-confirmed
+    /// maintenance action, so their missing evidence remains user-confirmed.
+    var resolvedOriginEvidence: ResetOriginEvidence? {
+        if let originEvidence { return originEvidence }
+        switch resolvedOrigin {
+        case .manual: return .userConfirmed
+        case .issued: return .providerReported
+        case .observed: return nil
+        }
+    }
+
+    var isManualReset: Bool { resolvedOrigin == .manual }
+
+    var isIssuedReset: Bool { resolvedOrigin == .issued }
+
+    var isCreditConsumedManualReset: Bool {
+        isManualReset && resolvedOriginEvidence == .resetCreditConsumed
+    }
+
+    var manualResetEvidenceText: String? {
+        guard isManualReset else { return nil }
+        switch resolvedOriginEvidence {
+        case .userConfirmed:
+            return "Manual reset · user-confirmed"
+        case .resetCreditConsumed:
+            return "Manual reset · reset credit consumed"
+        case .providerReported, .none:
+            return "Manual reset"
+        }
+    }
 
     /// Spark may be reported by the app-server under its public model name or
     /// its internal Bengalfox bucket identifier. This stays derived from the
@@ -132,6 +195,7 @@ struct ResetSeam: Identifiable, Hashable, Sendable {
     init(events: [ResetEvent]) {
         self.events = events.sorted {
             if $0.date != $1.date { return $0.date < $1.date }
+            if $0.isManualReset != $1.isManualReset { return $0.isManualReset }
             if $0.isSparkModelReset != $1.isSparkModelReset { return !$0.isSparkModelReset }
             return $0.id < $1.id
         }
@@ -148,6 +212,14 @@ struct ResetSeam: Identifiable, Hashable, Sendable {
     }
 
     var containsPrimaryReset: Bool { primaryReset != nil }
+
+    var containsManualReset: Bool {
+        events.contains(where: \.isManualReset)
+    }
+
+    var containsIssuedReset: Bool {
+        events.contains(where: \.isIssuedReset)
+    }
 
     var confidence: DataConfidence {
         if events.contains(where: { $0.confidence == .exact }) { return .exact }
@@ -220,6 +292,59 @@ struct LimitBucket: Identifiable, Codable, Hashable, Sendable {
     let windows: [RateLimitWindow]
     let confidence: DataConfidence
     let sourceDescription: String
+}
+
+/// The live App Server result is intentionally separate from `LimitBucket` so
+/// current earned-reset-credit state can be persisted without turning it into
+/// a chart-visible usage limit.
+struct CodexLiveLimits: Sendable {
+    let limits: [LimitBucket]
+    let earnedResetCredits: CodexEarnedResetCreditAvailability?
+}
+
+/// Current availability only. App Server does not expose a historical list of
+/// consumed credits, so QuotaWise observes this value over time locally.
+struct CodexEarnedResetCreditAvailability: Codable, Hashable, Sendable {
+    let availableCount: Int
+    /// `nil` means the provider supplied only the authoritative count. An
+    /// empty array means it did query details and found none.
+    let credits: [CodexEarnedResetCredit]?
+}
+
+struct CodexEarnedResetCredit: Identifiable, Codable, Hashable, Sendable {
+    /// Opaque provider identifier. It remains local-only and is never rendered.
+    let id: String
+    let resetType: String
+    let status: String
+    let grantedAt: Date?
+    let expiresAt: Date?
+    let title: String?
+    let description: String?
+}
+
+enum EarnedResetCreditLifecycle: String, Codable, Sendable {
+    case available
+    case consumed
+    case expired
+    case unattributed
+}
+
+/// Local audit record for a detailed earned reset credit. This is deliberately
+/// not fed to the presentation model; it exists solely to make future reset
+/// attribution inspectable and conservative.
+struct CodexEarnedResetCreditRecord: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var resetType: String
+    var providerStatus: String
+    var grantedAt: Date?
+    var expiresAt: Date?
+    var title: String?
+    var description: String?
+    var firstObservedAt: Date
+    var lastObservedAt: Date
+    var lifecycle: EarnedResetCreditLifecycle
+    var disappearedAt: Date?
+    var associatedResetID: String?
 }
 
 struct RateObservation: Codable, Hashable, Sendable {

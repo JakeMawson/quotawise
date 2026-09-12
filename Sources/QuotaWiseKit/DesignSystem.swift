@@ -10,6 +10,7 @@ enum UsagePalette {
     static let signalBlue = Color(hex: 0x5B8CFF)
     static let mineralTeal = Color(hex: 0x3CC8B4)
     static let burntAmber = Color(hex: 0xF2A43A)
+    static let manualResetNeon = Color(hex: 0xB9FF5A)
     static let danger = Color(hex: 0xFF6B73)
 
     static func accent(for provider: AIProvider) -> Color {

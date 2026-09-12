@@ -29,13 +29,17 @@ struct CodexAppServerClient: Sendable {
     }
 
     func fetchLimits() async throws -> [LimitBucket] {
+        try await fetchLiveLimits().limits
+    }
+
+    func fetchLiveLimits() async throws -> CodexLiveLimits {
         let executableURL = executableURL
         return try await Task.detached(priority: .utility) {
-            try Self.fetchLimitsBlocking(executableURL: executableURL)
+            try Self.fetchLiveLimitsBlocking(executableURL: executableURL)
         }.value
     }
 
-    private static func fetchLimitsBlocking(executableURL: URL?) throws -> [LimitBucket] {
+    private static func fetchLiveLimitsBlocking(executableURL: URL?) throws -> CodexLiveLimits {
         guard let executable = executableURL ?? locateCodexExecutable() else {
             throw CodexAppServerError.executableNotFound
         }
@@ -92,7 +96,7 @@ struct CodexAppServerClient: Sendable {
         guard let limitResponse = try response(id: 2, reader: &reader, timeout: 8) else {
             throw CodexAppServerError.timedOut("rate-limit read")
         }
-        return try decodeLimitResponse(limitResponse)
+        return try decodeLiveLimitResponse(limitResponse)
     }
 
     @discardableResult
@@ -129,6 +133,10 @@ struct CodexAppServerClient: Sendable {
     }
 
     static func decodeLimitResponse(_ response: [String: Any]) throws -> [LimitBucket] {
+        try decodeLiveLimitResponse(response).limits
+    }
+
+    static func decodeLiveLimitResponse(_ response: [String: Any]) throws -> CodexLiveLimits {
         guard response["error"] == nil,
               let result = response["result"] as? [String: Any] else {
             throw CodexAppServerError.protocolError(String(describing: response["error"] ?? "missing result"))
@@ -147,7 +155,7 @@ struct CodexAppServerClient: Sendable {
             rawBuckets.append((string(legacy["limitId"] ?? legacy["limit_id"]) ?? "codex", legacy))
         }
 
-        return rawBuckets.map { fallbackID, raw in
+        let limits = rawBuckets.map { fallbackID, raw in
             let id = string(raw["limitId"] ?? raw["limit_id"]) ?? fallbackID
             let explicitName = string(raw["limitName"] ?? raw["limit_name"])
             let displayName: String
@@ -187,6 +195,49 @@ struct CodexAppServerClient: Sendable {
             if rhs.id == "codex" { return false }
             return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
         }
+
+        return CodexLiveLimits(
+            limits: limits,
+            earnedResetCredits: decodeEarnedResetCredits(result["rateLimitResetCredits"])
+        )
+    }
+
+    private static func decodeEarnedResetCredits(_ value: Any?) -> CodexEarnedResetCreditAvailability? {
+        guard let raw = value as? [String: Any],
+              let availableCount = optionalInt(raw["availableCount"] ?? raw["available_count"]),
+              availableCount >= 0
+        else {
+            return nil
+        }
+
+        let credits: [CodexEarnedResetCredit]?
+        if raw["credits"] is NSNull || raw["credits"] == nil {
+            credits = nil
+        } else if let rows = raw["credits"] as? [[String: Any]] {
+            credits = rows.compactMap { row in
+                guard let id = string(row["id"]), !id.isEmpty else { return nil }
+                return CodexEarnedResetCredit(
+                    id: id,
+                    resetType: string(row["resetType"] ?? row["reset_type"]) ?? "unknown",
+                    status: string(row["status"]) ?? "unknown",
+                    grantedAt: optionalInt64(row["grantedAt"] ?? row["granted_at"])
+                        .map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                    expiresAt: optionalInt64(row["expiresAt"] ?? row["expires_at"])
+                        .map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                    title: string(row["title"]),
+                    description: string(row["description"])
+                )
+            }
+        } else {
+            // A malformed detail payload must not be treated as proof that a
+            // previously observed credit disappeared.
+            credits = nil
+        }
+
+        return CodexEarnedResetCreditAvailability(
+            availableCount: availableCount,
+            credits: credits
+        )
     }
 
     private static func response(

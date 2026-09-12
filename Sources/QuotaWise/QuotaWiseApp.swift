@@ -69,6 +69,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        if let manualResetID = CommandLine.arguments.first(where: {
+            $0.hasPrefix("--maintenance-mark-manual-reset=")
+        }).map({ String($0.dropFirst("--maintenance-mark-manual-reset=".count)) }), !manualResetID.isEmpty {
+            Task { @MainActor [weak self] in
+                let marked = await UsageApplicationModel.shared.markManualReset(forID: manualResetID)
+                self?.logStatusItemLifecycle(marked
+                    ? "persisted user-confirmed manual reset"
+                    : "could not find requested manual reset")
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
         for service in Self.legacyLaunchAtLoginServices {
             try? service.unregister()
         }

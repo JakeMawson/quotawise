@@ -359,13 +359,13 @@ struct UsageAreaChart: View {
 
             ForEach(resetSeams) { seam in
                 RuleMark(x: .value("Reset", seam.date))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: seam.confidence == .estimated ? [3, 4] : [1, 3]))
+                    .lineStyle(resetMarkerStyle(for: seam))
                     .foregroundStyle(resetMarkerColor(for: seam))
             }
 
             if let seam = hoveredResetSeam {
                 RuleMark(x: .value("Hovered reset", seam.date))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: seam.confidence == .estimated ? [3, 4] : [1, 3]))
+                    .lineStyle(resetMarkerStyle(for: seam, hovered: true))
                     .foregroundStyle(resetMarkerColor(for: seam).opacity(0.95))
             }
 
@@ -415,6 +415,19 @@ struct UsageAreaChart: View {
                                 selectDay(at: value.location, proxy: proxy, geometry: geometry)
                             }
                         )
+                    }
+
+                    if let anchor = proxy.plotFrame {
+                        let frame = geometry[anchor]
+                        ForEach(resetSeams.filter(\.containsManualReset)) { seam in
+                            if let resetX = proxy.position(forX: seam.date) {
+                                manualResetMarkerLabel
+                                    .position(
+                                        x: manualResetLabelCenterX(for: resetX, in: frame),
+                                        y: frame.minY + (compact ? 10 : 12)
+                                    )
+                            }
+                        }
                     }
 
                     if let seam = hoveredResetSeam,
@@ -554,19 +567,47 @@ struct UsageAreaChart: View {
     }
 
     private func resetTooltipTitle(for seam: ResetSeam) -> String {
+        if seam.containsManualReset { return "Manual reset" }
+        if seam.containsIssuedReset { return "Issued reset" }
         guard seam.events.count > 1 else { return seam.events.first?.label ?? "Reset" }
         let kind = seam.events.first?.kind == .weekly ? "weekly" : "session"
         return "Combined " + kind + " reset"
     }
 
     private func resetEvidenceLabel(for seam: ResetSeam) -> String {
+        if let userConfirmed = seam.events.first(where: {
+            $0.isManualReset && $0.resolvedOriginEvidence == .userConfirmed
+        })?.manualResetEvidenceText {
+            return userConfirmed
+        }
+        if let creditConsumed = seam.events.first(where: \.isCreditConsumedManualReset)?.manualResetEvidenceText {
+            return creditConsumed
+        }
+        if seam.containsManualReset { return "Manual reset" }
+        if seam.containsIssuedReset { return "Issued reset" }
         guard seam.confidence != .exact else { return "Observed reset" }
         return seam.events.first?.kind == .session
             ? "Estimated session schedule"
             : "Estimated weekly seam"
     }
 
+    private func resetMarkerStyle(for seam: ResetSeam, hovered: Bool = false) -> StrokeStyle {
+        let lineWidth: CGFloat
+        if seam.containsManualReset {
+            lineWidth = hovered ? 2 : 1.5
+        } else {
+            lineWidth = hovered ? 1.5 : 1
+        }
+        return StrokeStyle(
+            lineWidth: lineWidth,
+            dash: seam.confidence == .estimated ? [3, 4] : [1, 3]
+        )
+    }
+
     private func resetMarkerColor(for seam: ResetSeam) -> Color {
+        if seam.containsManualReset {
+            return UsagePalette.manualResetNeon
+        }
         if seam.containsPrimaryReset {
             return UsagePalette.mineralTeal.opacity(0.75)
         }
@@ -577,6 +618,25 @@ struct UsageAreaChart: View {
             return UsagePalette.mineralTeal.opacity(0.75)
         }
         return UsagePalette.porcelain.opacity(0.32)
+    }
+
+    private var manualResetMarkerLabel: some View {
+        Text("MANUAL")
+            .font(.system(size: compact ? 6.5 : 7.5, weight: .bold, design: .monospaced))
+            .tracking(0.45)
+            .foregroundStyle(UsagePalette.manualResetNeon)
+            .padding(.horizontal, compact ? 4 : 5)
+            .padding(.vertical, compact ? 2 : 3)
+            .background(Capsule().fill(UsagePalette.nightInk.opacity(0.92)))
+            .overlay(Capsule().stroke(UsagePalette.manualResetNeon.opacity(0.56), lineWidth: 0.6))
+    }
+
+    private func manualResetLabelCenterX(for resetX: CGFloat, in frame: CGRect) -> CGFloat {
+        let halfWidth: CGFloat = compact ? 22 : 26
+        return min(
+            frame.maxX - halfWidth - 3,
+            max(frame.minX + halfWidth + 3, frame.minX + resetX + halfWidth + 4)
+        )
     }
 }
 

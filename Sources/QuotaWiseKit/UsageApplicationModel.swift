@@ -144,6 +144,15 @@ public final class UsageApplicationModel: ObservableObject {
         loadState = .loading("Indexing local history")
     }
 
+    /// A maintenance-only path used to persist an explicitly user-confirmed
+    /// manual reset against its exact stored event ID.
+    public func markManualReset(forID id: String) async -> Bool {
+        let marked = await snapshotStore.markManualReset(forID: id)
+        guard marked else { return false }
+        resetEvents = await snapshotStore.storedResets()
+        return true
+    }
+
     public var menuBarLabel: String {
         let value = headlineRemaining
         guard let value, value.isFinite else { return "AI" }
@@ -320,7 +329,12 @@ public final class UsageApplicationModel: ObservableObject {
         async let claudeUsage = claudeUsageReader.read()
         async let historyScan: ScanResult? = includeHistory ? await performHistoryScan() : nil
 
-        let live = try? await codexClient.fetchLimits()
+        let liveSnapshot = try? await codexClient.fetchLiveLimits()
+        // This timestamp intentionally belongs to both the usage snapshot and
+        // earned-reset-credit observation. It lets the store compare one
+        // provider read, rather than guessing across later history work.
+        let liveObservedAt = Date()
+        let live = liveSnapshot?.limits
 
         if let live {
             Self.runtimeLog("live Codex limits loaded")
@@ -331,10 +345,15 @@ public final class UsageApplicationModel: ObservableObject {
             // duplicate call here so a single refresh doesn't record the same
             // observation twice.
             if !includeHistory {
-                let persisted = await snapshotStore.observe(live)
+                let persisted = await snapshotStore.observe(live, at: liveObservedAt)
+                _ = await snapshotStore.observeResetCredits(
+                    liveSnapshot?.earnedResetCredits,
+                    at: liveObservedAt
+                )
                 resetEvents = await snapshotStore.seedWeeklyBackfill(
                     from: live,
-                    observedResets: persisted
+                    observedResets: persisted,
+                    at: liveObservedAt
                 )
             }
             lastUpdated = Date()
@@ -381,7 +400,14 @@ public final class UsageApplicationModel: ObservableObject {
             warnings.append("Live Codex limits were unavailable; showing the newest local snapshot where possible.")
         }
 
-        let persisted = await snapshotStore.observe(codexLimits)
+        let snapshotObservedAt = live == nil ? Date() : liveObservedAt
+        let persisted = await snapshotStore.observe(codexLimits, at: snapshotObservedAt)
+        if let liveSnapshot {
+            _ = await snapshotStore.observeResetCredits(
+                liveSnapshot.earnedResetCredits,
+                at: snapshotObservedAt
+            )
+        }
         let exactAndProviderWrittenResets = scan.resetEvents + persisted
         let estimatedClaudeLimits = EstimatedLimitBuilder.claudeLimits(
             events: events,
@@ -398,7 +424,8 @@ public final class UsageApplicationModel: ObservableObject {
         }
         let stored = await snapshotStore.seedWeeklyBackfill(
             from: codexLimits + claudeLimits,
-            observedResets: exactAndProviderWrittenResets
+            observedResets: exactAndProviderWrittenResets,
+            at: snapshotObservedAt
         )
         var combinedResets = scan.resetEvents + stored
         combinedResets = Array(Dictionary(grouping: combinedResets, by: \.id).compactMap { $0.value.first })
