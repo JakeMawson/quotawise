@@ -77,6 +77,12 @@ struct TokenUsage: Codable, Hashable, Sendable {
     }
 }
 
+enum UsageCredit {
+    static let usdPerCredit = 0.04
+    static let summaryNote = "1 credit ≈ $0.04"
+    static let settingsNote = "1 credit ≈ USD $0.04"
+}
+
 struct UsageEvent: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let provider: AIProvider
@@ -89,7 +95,7 @@ struct UsageEvent: Identifiable, Codable, Hashable, Sendable {
     let pricingWasEstimated: Bool
     let serviceTier: String?
 
-    var credits: Double { apiEquivalentUSD * 100 }
+    var credits: Double { apiEquivalentUSD / UsageCredit.usdPerCredit }
 }
 
 enum ResetKind: String, Codable, Sendable {

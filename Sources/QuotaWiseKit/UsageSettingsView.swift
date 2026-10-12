@@ -69,7 +69,7 @@ public struct UsageSettingsView: View {
             }
 
             Section("Estimates") {
-                LabeledContent("Credit value", value: "1 credit = USD $0.01")
+                LabeledContent("Credit value", value: UsageCredit.settingsNote)
                 Text("API-equivalent prices estimate what the recorded tokens would cost through each provider's API. They are not subscription charges or an invoice. Claude limit percentages are inferred from local history unless an exact reset event is available.")
                     .font(.callout)
                     .foregroundStyle(.secondary)

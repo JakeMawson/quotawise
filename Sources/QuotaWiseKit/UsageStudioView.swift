@@ -270,14 +270,14 @@ public struct UsageStudioView: View {
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 SummaryMetric(title: "Runway", value: runway, note: model.headlineSubtitle, accent: UsagePalette.accent(for: model.selectedProvider))
-                SummaryMetric(title: "Credits", value: UsageFormat.credits(credits), note: "1 credit = $0.01", accent: UsagePalette.secondaryAccent(for: model.selectedProvider))
+                SummaryMetric(title: "Credits", value: UsageFormat.credits(credits), note: UsageCredit.summaryNote, accent: UsagePalette.secondaryAccent(for: model.selectedProvider))
                 SummaryMetric(title: "API equivalent", value: UsageFormat.dollars(dollars), note: "Estimated, not billed", accent: UsagePalette.mineralTeal)
                 SummaryMetric(title: "Tokens", value: UsageFormat.integer(tokens), note: selectedPeriodNote, accent: UsagePalette.porcelain)
             }
             VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     SummaryMetric(title: "Runway", value: runway, note: model.headlineSubtitle, accent: UsagePalette.accent(for: model.selectedProvider))
-                    SummaryMetric(title: "Credits", value: UsageFormat.credits(credits), note: "1 credit = $0.01", accent: UsagePalette.secondaryAccent(for: model.selectedProvider))
+                    SummaryMetric(title: "Credits", value: UsageFormat.credits(credits), note: UsageCredit.summaryNote, accent: UsagePalette.secondaryAccent(for: model.selectedProvider))
                 }
                 HStack(spacing: 12) {
                     SummaryMetric(title: "API equivalent", value: UsageFormat.dollars(dollars), note: "Estimated, not billed", accent: UsagePalette.mineralTeal)

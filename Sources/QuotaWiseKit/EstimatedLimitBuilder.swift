@@ -60,7 +60,7 @@ enum EstimatedLimitBuilder {
         guard let baseline = percentile(fullSamples, fraction: 0.5)
             ?? percentile(rollingWindowCredits(events: events, duration: 5 * 3_600, before: start), fraction: 0.9)
         else { return nil }
-        let used = max(0, min(100, currentCredits / max(0.01, baseline) * 100))
+        let used = max(0, min(100, currentCredits / max(0.0001 / UsageCredit.usdPerCredit, baseline) * 100))
 
         return RateLimitWindow(
             usedPercent: used,
@@ -107,7 +107,7 @@ enum EstimatedLimitBuilder {
             if value > 0 { weeklySamples.append(value) }
         }
         guard let baseline = percentile(weeklySamples, fraction: 0.9) else { return nil }
-        let used = max(0, min(100, currentCredits / max(0.01, baseline) * 100))
+        let used = max(0, min(100, currentCredits / max(0.0001 / UsageCredit.usdPerCredit, baseline) * 100))
 
         return RateLimitWindow(
             usedPercent: used,

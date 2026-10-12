@@ -5,6 +5,30 @@ import XCTest
 @testable import QuotaWiseKit
 
 final class QuotaWiseKitTests: XCTestCase {
+    func testUsageCreditsUseFourCentsPerCreditForBothProviders() throws {
+        for provider in AIProvider.allCases {
+            for (dollars, expectedCredits) in [(0.0, 0.0), (0.04, 1.0), (1.0, 25.0), (4.25, 106.25)] {
+                let event = UsageEvent(
+                    id: "credit-value",
+                    provider: provider,
+                    timestamp: Date(timeIntervalSince1970: 1_800_000_000),
+                    model: "fixture",
+                    projectPath: "/credit-value",
+                    projectName: "Credit value",
+                    tokens: TokenUsage(input: 100),
+                    apiEquivalentUSD: dollars,
+                    pricingWasEstimated: false,
+                    serviceTier: nil
+                )
+                // History persists dollars. Decoding it must apply the current
+                // credit value without changing the recorded API estimate.
+                let restored = try JSONDecoder().decode(UsageEvent.self, from: JSONEncoder().encode(event))
+                XCTAssertEqual(restored.credits, expectedCredits, accuracy: 0.000_001)
+                XCTAssertEqual(restored.apiEquivalentUSD, dollars)
+            }
+        }
+    }
+
     func testCodexReserveVisibilityTracksThePrimaryWeeklyAllowance() {
         let reset = Date(timeIntervalSince1970: 1_800_000_000)
         let reserve = Self.limitBucket(id: "gpt-reserve", resetAt: reset, usedPercent: 22)
@@ -2426,7 +2450,7 @@ final class QuotaWiseKitTests: XCTestCase {
             return UsageChartPoint(
                 date: start.addingTimeInterval(Double(day) * 86_400),
                 credits: credits,
-                apiEquivalentUSD: credits / 100,
+                apiEquivalentUSD: credits * 0.04,
                 tokens: Int64(credits * 1_000)
             )
         }
@@ -2569,7 +2593,7 @@ final class QuotaWiseKitTests: XCTestCase {
             return UsageChartPoint(
                 date: start.addingTimeInterval(Double(day) * 86_400),
                 credits: credits,
-                apiEquivalentUSD: credits / 100,
+                apiEquivalentUSD: credits * 0.04,
                 tokens: Int64(credits * 1_000)
             )
         }
@@ -2640,7 +2664,7 @@ final class QuotaWiseKitTests: XCTestCase {
             return UsageChartPoint(
                 date: start.addingTimeInterval(Double(day) * 86_400),
                 credits: credits,
-                apiEquivalentUSD: credits / 100,
+                apiEquivalentUSD: credits * 0.04,
                 tokens: Int64(credits * 1_000)
             )
         }
@@ -3275,7 +3299,7 @@ final class QuotaWiseKitTests: XCTestCase {
             projectPath: project,
             projectName: URL(filePath: project).lastPathComponent,
             tokens: TokenUsage(input: Int64(credits)),
-            apiEquivalentUSD: credits / 100,
+            apiEquivalentUSD: credits * 0.04,
             pricingWasEstimated: false,
             serviceTier: nil
         )
@@ -3289,7 +3313,7 @@ final class QuotaWiseKitTests: XCTestCase {
             projectName: "Test project",
             tokens: TokenUsage(input: Int64(credits)),
             credits: credits,
-            apiEquivalentUSD: credits / 100,
+            apiEquivalentUSD: credits * 0.04,
             isEstimate: false
         )
     }
