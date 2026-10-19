@@ -94,6 +94,24 @@ final class HistoryRetentionTests: XCTestCase {
         XCTAssertEqual(after.events, before.events)
     }
 
+    func testForkedRolloutsSharingParentMetadataKeepIndependentHourlyUsage() async throws {
+        let f = try fixture()
+        let date = Date().addingTimeInterval(-3 * 86_400)
+        let names = [
+            "rollout-2026-10-17T00-00-00-01a11564-cfa5-7272-8919-827ffebf9f64.jsonl",
+            "rollout-2026-10-17T00-00-01-01a11564-cfa5-7272-8919-827ffebf9f64_01a11566-8c28-72e0-923a-7df04c8910f0.jsonl",
+        ]
+        for name in names {
+            try writeCodex(f.codex.appending(path: "sessions/" + name), session: "shared-parent", at: date)
+        }
+        let scanner = LocalUsageScanner(codexHome: f.codex, claudeHome: f.claude, cacheURL: f.cache)
+        let before = await scanner.scanAll()
+        XCTAssertEqual(before.events.reduce(0) { $0 + $1.tokens.input }, 13_000)
+        try FileManager.default.moveItem(at: f.codex.appending(path: "sessions/" + names[1]), to: f.root.appending(path: "migrated-fork.jsonl"))
+        let retained = await scanner.scanAll()
+        XCTAssertEqual(retained.events, before.events)
+    }
+
     func testMissingSourcesExpireByEventDateAndCannotLeakAcrossHomes() async throws {
         let f = try fixture()
         let now = Date()

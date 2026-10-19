@@ -419,8 +419,11 @@ actor LocalUsageScanner {
 
     private func sourceIdentity(path: String, cached: CachedFile) -> String {
         let provider = cachedProvider(for: path)?.rawValue ?? "unknown"
-        let session = cached.codexCheckpoint?.sessionID
-            ?? URL(filePath: path).deletingPathExtension().lastPathComponent
+        let name = URL(filePath: path).deletingPathExtension().lastPathComponent
+        // Forked rollouts can retain their parent's session_meta ID. The final
+        // UUID in the rollout filename identifies the actual child session.
+        let session = UUID(uuidString: String(name.suffix(36)))?.uuidString.lowercased()
+            ?? cached.codexCheckpoint?.sessionID ?? name
         let project = provider == AIProvider.claude.rawValue ? cached.parsed.events.first?.projectPath ?? "" : ""
         return "\(provider):\(project):\(session)"
     }
