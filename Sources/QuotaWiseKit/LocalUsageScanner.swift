@@ -117,8 +117,7 @@ actor LocalUsageScanner {
 
     var needsInitialIndex: Bool { cache.isEmpty }
 
-    func scanAll() -> ScanResult {
-        let now = Date()
+    func scanAll(now: Date = Date()) -> ScanResult {
         let codexCutoff = codexLookbackDays.flatMap {
             Calendar.current.date(byAdding: .day, value: -$0, to: now)
         } ?? .distantPast
@@ -141,18 +140,23 @@ actor LocalUsageScanner {
                     || Self.contentModificationDate(for: $0) >= claudeCutoff
             }
         let knownPaths = Set((codexFiles + claudeFiles).map(\.path))
-        let retainedCache = cache.filter { knownPaths.contains($0.key) }
+        // Source files are not the lifetime of measured usage: Codex can migrate
+        // a rollout into paginated history and remove its legacy JSONL file.
+        // Keep this index scoped to the configured homes, then age missing
+        // sources by their event dates below instead of discarding their usage.
+        let retainedCache = cache.filter { cachedProvider(for: $0.key) != nil }
         if retainedCache.count != cache.count {
             cache = retainedCache
             cacheDirty = true
         }
 
-        var parsedFiles: [ParsedFile] = []
+        var parsedFiles: [(path: String, parsed: ParsedFile)] = []
         parsedFiles.reserveCapacity(codexFiles.count + claudeFiles.count)
 
         for file in codexFiles {
             guard let signature = fileSignature(file) else {
-                parsedFiles.append(ParsedFile(warnings: ["Could not inspect \(file.lastPathComponent)"]))
+                parsedFiles.append((file.path, cache[file.path]?.parsed ?? ParsedFile()))
+                parsedFiles.append((file.path + ":warning", ParsedFile(warnings: ["Could not inspect \(file.lastPathComponent)"])))
                 continue
             }
             if let cached = cache[file.path], cached.signature == signature {
@@ -170,7 +174,7 @@ actor LocalUsageScanner {
                     )
                     cacheDirty = true
                 }
-                parsedFiles.append(value)
+                parsedFiles.append((file.path, value))
             } else if let cached = cache[file.path], signature.size > cached.signature.size {
                 // Resume from the checkpoint's confirmed-safe line boundary, not the raw cached
                 // file size: if the file was captured mid-write last time (a partial trailing
@@ -198,7 +202,7 @@ actor LocalUsageScanner {
                     )
                     cacheDirty = true
                 }
-                parsedFiles.append(value)
+                parsedFiles.append((file.path, value))
             } else {
                 let parsed = Self.parseCodexFile(file, eventCutoff: codexCutoff)
                 let value = Self.compacted(
@@ -215,12 +219,13 @@ actor LocalUsageScanner {
                     )
                     cacheDirty = true
                 }
-                parsedFiles.append(value)
+                parsedFiles.append((file.path, value))
             }
         }
         for file in claudeFiles {
             guard let signature = fileSignature(file) else {
-                parsedFiles.append(ParsedFile(warnings: ["Could not inspect \(file.lastPathComponent)"]))
+                parsedFiles.append((file.path, cache[file.path]?.parsed ?? ParsedFile()))
+                parsedFiles.append((file.path + ":warning", ParsedFile(warnings: ["Could not inspect \(file.lastPathComponent)"])))
                 continue
             }
             if let cached = cache[file.path], cached.signature == signature {
@@ -239,7 +244,7 @@ actor LocalUsageScanner {
                     )
                     cacheDirty = true
                 }
-                parsedFiles.append(value)
+                parsedFiles.append((file.path, value))
             } else if let cached = cache[file.path], signature.size > cached.signature.size {
                 // Claude events are stateless per line, so the same safe-boundary resume offset
                 // used for Codex is all that's needed here — no running totals to reconstruct.
@@ -265,7 +270,7 @@ actor LocalUsageScanner {
                     )
                     cacheDirty = true
                 }
-                parsedFiles.append(value)
+                parsedFiles.append((file.path, value))
             } else {
                 let parsed = Self.parseClaudeFile(file, eventCutoff: claudeCutoff)
                 let value = Self.compacted(
@@ -286,8 +291,47 @@ actor LocalUsageScanner {
                     )
                     cacheDirty = true
                 }
-                parsedFiles.append(value)
+                parsedFiles.append((file.path, value))
             }
+        }
+
+        let liveIdentities = Set(knownPaths.compactMap { path in
+            cache[path].map { sourceIdentity(path: path, cached: $0) }
+        })
+        for (path, cached) in cache where !knownPaths.contains(path) {
+            // A session moved to archived_sessions must replace, rather than
+            // add to, its retained copy. Hourly aggregates cannot be deduplicated
+            // by event ID: independent sessions legitimately share those IDs.
+            guard !liveIdentities.contains(sourceIdentity(path: path, cached: cached)),
+                  let provider = cachedProvider(for: path) else {
+                cache.removeValue(forKey: path)
+                cacheDirty = true
+                continue
+            }
+            let cutoff = provider == .codex ? codexCutoff : claudeCutoff
+            var value = Self.compacted(
+                cached.parsed,
+                sourceKey: path,
+                eventCutoff: cutoff,
+                recentDetailCutoff: recentDetailCutoff
+            )
+            value.resetEvents.removeAll { $0.date < cutoff }
+            value.observations.removeAll { $0.observedAt < cutoff }
+            guard !value.events.isEmpty || !value.resetEvents.isEmpty || !value.observations.isEmpty else {
+                cache.removeValue(forKey: path)
+                cacheDirty = true
+                continue
+            }
+            if value != cached.parsed {
+                cache[path] = CachedFile(
+                    signature: cached.signature,
+                    parsed: value,
+                    codexCheckpoint: cached.codexCheckpoint,
+                    claudeResumeOffset: cached.claudeResumeOffset
+                )
+                cacheDirty = true
+            }
+            parsedFiles.append((path, value))
         }
 
         let labels = Self.codexProjectLabels(at: codexHome)
@@ -296,7 +340,17 @@ actor LocalUsageScanner {
         var seenResetIDs = Set<String>()
         var hourlyEvents: [AggregateKey: UsageEvent] = [:]
 
-        for parsed in parsedFiles {
+        var seenSources = Set<String>()
+        // When both a restored rollout and its archived copy are present, use
+        // the most complete source once, before merging hourly aggregates.
+        parsedFiles.sort {
+            let left = cache[$0.path]?.signature.size ?? 0
+            let right = cache[$1.path]?.signature.size ?? 0
+            return left == right ? $0.path < $1.path : left > right
+        }
+        for (path, parsed) in parsedFiles {
+            if let cached = cache[path],
+               !seenSources.insert(sourceIdentity(path: path, cached: cached)).inserted { continue }
             for event in parsed.events {
                 let name = Self.projectName(for: event.projectPath, labels: labels, fallback: event.projectName)
                 let normalized = UsageEvent(
@@ -337,6 +391,38 @@ actor LocalUsageScanner {
         result.observations.sort { $0.observedAt < $1.observedAt }
         saveCacheIfNeeded()
         return result
+    }
+
+    private func cachedProvider(for path: String) -> AIProvider? {
+        let path = Self.historyPath(URL(filePath: path))
+        for name in ["sessions", "archived_sessions"] {
+            if path.hasPrefix(Self.historyPath(codexHome.appending(path: name)) + "/") { return .codex }
+        }
+        if path.hasPrefix(Self.historyPath(claudeHome.appending(path: "projects")) + "/") { return .claude }
+        return nil
+    }
+
+    // Foundation resolves aliases differently for existing and missing files
+    // (notably /var and /private/var). Resolve the surviving ancestor so a file
+    // disappearing cannot itself change which configured home owns its cache.
+    private static func historyPath(_ url: URL) -> String {
+        var ancestor = url
+        var missing: [String] = []
+        while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
+            missing.append(ancestor.lastPathComponent)
+            ancestor.deleteLastPathComponent()
+        }
+        var resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL
+        for component in missing.reversed() { resolved.append(path: component) }
+        return resolved.path
+    }
+
+    private func sourceIdentity(path: String, cached: CachedFile) -> String {
+        let provider = cachedProvider(for: path)?.rawValue ?? "unknown"
+        let session = cached.codexCheckpoint?.sessionID
+            ?? URL(filePath: path).deletingPathExtension().lastPathComponent
+        let project = provider == AIProvider.claude.rawValue ? cached.parsed.events.first?.projectPath ?? "" : ""
+        return "\(provider):\(project):\(session)"
     }
 
     func historyFileCount(atLeast threshold: Int) -> Int? {

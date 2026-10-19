@@ -50,6 +50,12 @@ locally. It does not operate a QuotaWise account, sync service, or analytics
 backend, and it does not upload your prompts, responses, project names, or
 usage history to one.
 
+Measured usage is retained within each provider’s history window even when a
+provider removes or migrates its original session files. Moving a session into
+archived history does not add its usage twice. Records removed before QuotaWise
+indexed them, or before this retention fix, require a surviving detailed usage
+source or backup for accurate recovery.
+
 Some provider data can be unavailable or incomplete. When that happens,
 QuotaWise favours a clearly labelled estimate or an unavailable state over a
 misleadingly precise answer.
