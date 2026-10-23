@@ -335,7 +335,10 @@ actor LocalUsageScanner {
         }
 
         let labels = Self.codexProjectLabels(at: codexHome)
+        let projects = CodexProjectCatalog(home: codexHome)
+        var identities: [String: (path: String, name: String)] = [:]
         var result = ScanResult()
+        result.projects = projects.projects
         var seenEventIDs = Set<String>()
         var seenResetIDs = Set<String>()
         var hourlyEvents: [AggregateKey: UsageEvent] = [:]
@@ -353,13 +356,21 @@ actor LocalUsageScanner {
                !seenSources.insert(sourceIdentity(path: path, cached: cached)).inserted { continue }
             for event in parsed.events {
                 let name = Self.projectName(for: event.projectPath, labels: labels, fallback: event.projectName)
+                let identity: (path: String, name: String)
+                if event.provider == .codex {
+                    let key = path + "\u{0}" + event.projectPath
+                    identity = identities[key] ?? projects.project(for: event.projectPath, sourcePath: path)
+                    identities[key] = identity
+                } else {
+                    identity = (event.projectPath, name)
+                }
                 let normalized = UsageEvent(
                     id: event.id,
                     provider: event.provider,
                     timestamp: event.timestamp,
                     model: event.model,
-                    projectPath: event.projectPath,
-                    projectName: name,
+                    projectPath: identity.path,
+                    projectName: identity.name,
                     tokens: event.tokens,
                     apiEquivalentUSD: event.apiEquivalentUSD,
                     pricingWasEstimated: event.pricingWasEstimated,

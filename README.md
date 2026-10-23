@@ -56,6 +56,13 @@ archived history does not add its usage twice. Records removed before QuotaWise
 indexed them, or before this retention fix, require a surviving detailed usage
 source or backup for accurate recovery.
 
+Codex projects are discovered from its saved project catalog, including projects
+without retained usage. Chat membership, registered roots, moved-folder symlinks
+and Git worktree metadata keep one project's usage together. Unrelated folders
+with the same name remain separate. Projects without measured history are
+labelled “No recorded usage”; project discovery does not reconstruct missing
+token records or alter quota reset history.
+
 Some provider data can be unavailable or incomplete. When that happens,
 QuotaWise favours a clearly labelled estimate or an unavailable state over a
 misleadingly precise answer.

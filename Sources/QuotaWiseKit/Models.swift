@@ -370,6 +370,7 @@ struct ProjectSummary: Identifiable, Hashable, Sendable {
     let provider: AIProvider
     let credits: Double
     let lastUsed: Date
+    var hasRecordedUsage: Bool = true
 }
 
 enum UsageTimeRange: String, CaseIterable, Identifiable, Sendable {
@@ -465,6 +466,7 @@ struct DailyUsageRow: Identifiable, Hashable, Sendable {
 
 struct ScanResult: Sendable {
     var events: [UsageEvent] = []
+    var projects: [ProjectSummary] = []
     var resetEvents: [ResetEvent] = []
     var observations: [RateObservation] = []
     var warnings: [String] = []

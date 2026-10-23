@@ -30,6 +30,7 @@ public final class UsageApplicationModel: ObservableObject {
     @Published private(set) var selectedHistoricalDay: Date?
     @Published private(set) var loadState: UsageLoadState = .idle
     @Published private(set) var events: [UsageEvent] = []
+    @Published private(set) var detectedProjects: [ProjectSummary] = []
     @Published private(set) var resetEvents: [ResetEvent] = []
     @Published private(set) var codexLimits: [LimitBucket] = []
     @Published private(set) var claudeLimits: [LimitBucket] = []
@@ -202,19 +203,15 @@ public final class UsageApplicationModel: ObservableObject {
     }
 
     var projects: [ProjectSummary] {
-        let grouped = Dictionary(grouping: events, by: { "\($0.provider.rawValue):\($0.projectPath)" })
-        return grouped.compactMap { _, values in
-            guard let latest = values.max(by: { $0.timestamp < $1.timestamp }) else { return nil }
-            return ProjectSummary(
-                path: latest.projectPath,
-                name: latest.projectName,
-                provider: latest.provider,
-                credits: values.reduce(0) { $0 + $1.credits },
-                lastUsed: latest.timestamp
-            )
-        }.sorted {
-            if $0.provider != $1.provider { return $0.provider.rawValue < $1.provider.rawValue }
-            return $0.lastUsed > $1.lastUsed
+        ProjectSummary.combining(events: events, detected: detectedProjects)
+    }
+
+    // Project presentation is deliberately independent of limits/reset updates.
+    func applyProjectHistory(_ scan: ScanResult) {
+        events = scan.events
+        detectedProjects = scan.projects
+        if let selectedProjectPath, !projects.contains(where: { $0.provider == selectedProvider && $0.path == selectedProjectPath }) {
+            self.selectedProjectPath = nil
         }
     }
 
@@ -392,7 +389,7 @@ public final class UsageApplicationModel: ObservableObject {
 
         Self.runtimeLog("local history index loaded: \(scan.events.count) events")
 
-        events = scan.events
+        applyProjectHistory(scan)
         hasClaudeHistory = events.contains(where: { $0.provider == .claude })
         warnings = scan.warnings
         codexLimits = live ?? Self.limitsFromObservations(scan.observations)

@@ -90,7 +90,7 @@ public struct UsageStudioView: View {
                 ScrollView {
                     LazyVStack(spacing: 4) {
                         ForEach(filteredProjects) { project in
-                            projectButton(name: project.name, path: project.path, credits: project.credits)
+                            projectButton(name: project.name, path: project.path, credits: project.hasRecordedUsage ? project.credits : nil)
                         }
                     }
                 }
@@ -132,6 +132,10 @@ public struct UsageStudioView: View {
                         .lineLimit(1)
                     if let credits {
                         Text("\(UsageFormat.credits(credits)) cr")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(UsagePalette.secondaryText.opacity(0.75))
+                    } else if path != nil {
+                        Text("No recorded usage")
                             .font(.system(size: 8, design: .monospaced))
                             .foregroundStyle(UsagePalette.secondaryText.opacity(0.75))
                     }
